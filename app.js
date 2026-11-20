@@ -7,7 +7,7 @@ const EXPIRATION_MINUTES = 180;
 const API_BASE_URL = "https://clipvault-api.faisal-n04.workers.dev";
 
 const GB = 1000 * 1000 * 1000; // Decimal GB to match Cloudflare R2 billing
-const LOCAL_LIST_KEY = "clipvault_my_clips_v1";
+const LEGACY_LOCAL_LIST_KEY = "clipvault_my_clips_v1";
 const PASSCODE_STORAGE_KEY = "clipvault_upload_passcode";
 
 /* ==========================================================================
@@ -15,6 +15,7 @@ const PASSCODE_STORAGE_KEY = "clipvault_upload_passcode";
    ========================================================================== */
 const state = {
   clips: [],
+  loadingClips: false,
   activeViewerClipId: null,
   isUnlocked: false,
   passcode: "",
@@ -133,6 +134,11 @@ function setUploaderUnlocked(unlocked, passcode = "") {
   if (unlocked) {
     clearAuthError();
     dom.passcodeInput.value = "";
+  } else {
+    // Immediately clear clips from memory & UI when locked
+    state.clips = [];
+    state.loadingClips = false;
+    renderClipList();
   }
 }
 
@@ -175,7 +181,7 @@ async function verifyAndUnlock(code, { silent = false } = {}) {
 
     saveStoredPasscode(trimmed);
     setUploaderUnlocked(true, trimmed);
-    refreshStorageUsage();
+    syncDashboardFromR2();
     if (!silent) showToast("Uploader unlocked.", "success");
     return true;
   } catch (err) {
@@ -192,7 +198,7 @@ async function verifyAndUnlock(code, { silent = false } = {}) {
 }
 
 /* ==========================================================================
-   LIVE R2 STORAGE USAGE BAR
+   CLOUD-SYNCED DASHBOARD (CLIPS + LIVE R2 STORAGE USAGE)
    ========================================================================== */
 function formatGigabytes(bytes) {
   return (Math.max(0, bytes) / GB).toFixed(2);
@@ -232,13 +238,12 @@ function renderStorageUsage(data) {
   dom.storageSubtext.textContent = `${formatGigabytes(remainingBytes)} GB available • ${storedCount} stored ${clipWord} in R2${inFlightNote}`;
 }
 
-async function refreshStorageUsage({ showSpinner = false } = {}) {
+async function refreshStorageUsage() {
   if (!state.isUnlocked || !state.passcode || !isApiConfigured()) return;
-
-  if (showSpinner) dom.refreshStorageBtn.classList.add("is-spinning");
 
   try {
     const usage = await R2Service.fetchStorageUsage(state.passcode);
+    if (!state.isUnlocked) return;
     renderStorageUsage(usage);
   } catch (err) {
     if (err.status === 401) {
@@ -248,6 +253,39 @@ async function refreshStorageUsage({ showSpinner = false } = {}) {
     }
     console.error("Storage usage check failed:", err);
     dom.storageSubtext.textContent = "Unable to load live storage usage right now.";
+  }
+}
+
+async function syncActiveClipsFromR2() {
+  if (!state.isUnlocked || !state.passcode || !isApiConfigured()) return;
+
+  state.loadingClips = true;
+  if (state.clips.length === 0) renderClipList();
+
+  try {
+    const clips = await R2Service.fetchAllClips(state.passcode);
+    if (!state.isUnlocked) return;
+    state.clips = clips;
+  } catch (err) {
+    if (err.status === 401) {
+      lockUploader("");
+      promptUnlockFocus("Passcode rejected. Please unlock again.");
+      return;
+    }
+    console.error("Clip list sync failed:", err);
+    showToast("Could not sync active clips from R2.", "error");
+  } finally {
+    state.loadingClips = false;
+    renderClipList();
+  }
+}
+
+async function syncDashboardFromR2({ showSpinner = false } = {}) {
+  if (!state.isUnlocked || !state.passcode || !isApiConfigured()) return;
+  if (showSpinner) dom.refreshStorageBtn.classList.add("is-spinning");
+
+  try {
+    await Promise.all([refreshStorageUsage(), syncActiveClipsFromR2()]);
   } finally {
     if (showSpinner) dom.refreshStorageBtn.classList.remove("is-spinning");
   }
@@ -295,6 +333,18 @@ const R2Service = {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new ApiError(data.error || `Storage check failed (${res.status})`, res.status);
     return data;
+  },
+
+  async fetchAllClips(passcode) {
+    const res = await fetch(`${getApiBase()}/api/clips`, {
+      method: "GET",
+      headers: {
+        "X-Upload-Passcode": passcode
+      }
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new ApiError(data.error || `Clip sync failed (${res.status})`, res.status);
+    return Array.isArray(data.clips) ? data.clips : [];
   },
 
   async initUpload({ name, type, mediaKind, size }, passcode) {
@@ -375,40 +425,18 @@ const R2Service = {
     return data; // { clip, mediaUrl }
   },
 
-  async deleteClip(id, deleteToken) {
+  async deleteClip(id, { passcode = "", deleteToken = "" } = {}) {
+    const headers = {};
+    if (passcode) headers["X-Upload-Passcode"] = passcode;
+    if (deleteToken) headers["X-Delete-Token"] = deleteToken;
+
     const res = await fetch(`${getApiBase()}/api/clips/${encodeURIComponent(id)}`, {
       method: "DELETE",
-      headers: { "X-Delete-Token": deleteToken || "" }
+      headers
     });
     if (!res.ok && res.status !== 404) {
       const data = await res.json().catch(() => ({}));
       throw new ApiError(data.error || `Delete failed (${res.status})`, res.status);
-    }
-  }
-};
-
-/* ==========================================================================
-   LOCAL DASHBOARD TRACKER (Uploader's Own Active Clips Only)
-   ========================================================================== */
-const LocalHistory = {
-  load() {
-    try {
-      const raw = localStorage.getItem(LOCAL_LIST_KEY);
-      const parsed = raw ? JSON.parse(raw) : [];
-      const now = Date.now();
-      const active = Array.isArray(parsed) ? parsed.filter((c) => c.expiresAt > now) : [];
-      this.save(active);
-      return active;
-    } catch {
-      return [];
-    }
-  },
-
-  save(clips) {
-    try {
-      localStorage.setItem(LOCAL_LIST_KEY, JSON.stringify(clips));
-    } catch {
-      // Ignore storage quota issues for tiny metadata list
     }
   }
 };
@@ -576,7 +604,7 @@ async function handleFilesSelected(fileList) {
         )
       );
 
-      // Update bar immediately to show reserved bytes in flight
+      // Update storage bar immediately to reflect in-flight reserved bytes
       refreshStorageUsage();
 
       uploadTasks.push(
@@ -585,6 +613,7 @@ async function handleFilesSelected(fileList) {
           contentType,
           clip: reservation.clip,
           uploadUrl: reservation.uploadUrl,
+          passcode: activePasscode,
           ui
         })
       );
@@ -615,7 +644,7 @@ async function handleFilesSelected(fileList) {
   }, 600);
 }
 
-async function uploadReservedFile({ file, contentType, clip, uploadUrl, ui }) {
+async function uploadReservedFile({ file, contentType, clip, uploadUrl, passcode, ui }) {
   try {
     await R2Service.uploadDirectToR2(uploadUrl, file, contentType, (pct) => {
       const scaled = 5 + pct * 0.9; // 5% -> 95%
@@ -626,10 +655,11 @@ async function uploadReservedFile({ file, contentType, clip, uploadUrl, ui }) {
     const finalizedClip = await R2Service.completeUpload(clip.id, clip.deleteToken);
 
     ui.setProgress(100, "Ready");
-    state.clips.unshift(finalizedClip);
-    LocalHistory.save(state.clips);
-    renderClipList();
-    refreshStorageUsage();
+    if (state.isUnlocked) {
+      state.clips = [finalizedClip, ...state.clips.filter((c) => c.id !== finalizedClip.id)];
+      renderClipList();
+      refreshStorageUsage();
+    }
     ui.remove(500);
   } catch (err) {
     console.error("Upload failed:", err);
@@ -637,7 +667,10 @@ async function uploadReservedFile({ file, contentType, clip, uploadUrl, ui }) {
     showToast(err.message || `Failed to upload "${file.name}".`, "error");
 
     // Release pending R2 reservation immediately and refresh storage bar
-    await R2Service.deleteClip(clip.id, clip.deleteToken).catch(() => { });
+    await R2Service.deleteClip(clip.id, {
+      passcode,
+      deleteToken: clip.deleteToken
+    }).catch(() => { });
     refreshStorageUsage();
     ui.remove(3200);
   }
@@ -699,19 +732,43 @@ function updateQueueCounter() {
 /* ==========================================================================
    CLIP LIST RENDERING
    ========================================================================== */
+function setEmptyStateMessage(message) {
+  const p = dom.emptyState.querySelector("p");
+  if (p) p.textContent = message;
+}
+
 function renderClipList() {
+  if (!state.isUnlocked) {
+    dom.activeCount.textContent = "0";
+    dom.copyAllBtn.classList.add("hidden");
+    dom.clearAllBtn.classList.add("hidden");
+    dom.clipList.innerHTML = "";
+    setEmptyStateMessage("Unlock the uploader above to view and manage your active clips.");
+    dom.emptyState.classList.remove("hidden");
+    return;
+  }
+
   const now = Date.now();
   state.clips = state.clips
     .filter((clip) => clip.expiresAt > now)
     .sort((a, b) => b.createdAt - a.createdAt);
 
-  LocalHistory.save(state.clips);
-
   dom.activeCount.textContent = String(state.clips.length);
-  dom.emptyState.classList.toggle("hidden", state.clips.length > 0);
   dom.copyAllBtn.classList.toggle("hidden", state.clips.length < 2);
   dom.clearAllBtn.classList.toggle("hidden", state.clips.length === 0);
 
+  if (state.clips.length === 0) {
+    dom.clipList.innerHTML = "";
+    setEmptyStateMessage(
+      state.loadingClips
+        ? "Syncing active clips from R2..."
+        : "No active clips in R2. Upload video or audio files above to generate shareable links."
+    );
+    dom.emptyState.classList.remove("hidden");
+    return;
+  }
+
+  dom.emptyState.classList.add("hidden");
   dom.clipList.innerHTML = "";
   const fragment = document.createDocumentFragment();
 
@@ -832,7 +889,7 @@ function createClipCard(clip) {
 }
 
 /* ==========================================================================
-   DEDICATED CROSS-DEVICE VIEWER ROUTING
+   DEDICATED CROSS-DEVICE VIEWER ROUTING (PUBLIC — NO PASSCODE NEEDED)
    ========================================================================== */
 function cleanupViewerMedia() {
   const mediaEl = dom.viewerMediaStage.querySelector("video, audio");
@@ -852,9 +909,8 @@ async function handleRouteChange() {
     state.activeViewerClipId = null;
     dom.viewerView.classList.add("hidden");
     dom.uploaderView.classList.remove("hidden");
-    state.clips = LocalHistory.load();
     renderClipList();
-    if (state.isUnlocked) refreshStorageUsage();
+    if (state.isUnlocked) syncDashboardFromR2();
     return;
   }
 
@@ -952,23 +1008,26 @@ function showViewerExpired(title, message) {
    LIVE COUNTDOWN TICKER & DELETION
    ========================================================================== */
 async function deleteClipById(id, notify = false) {
-  const clip = state.clips.find((c) => c.id === id);
   const card = dom.clipList.querySelector(`[data-clip-id="${CSS.escape(id)}"]`);
   if (card) card.classList.add("removing");
 
   try {
-    if (clip?.deleteToken && isApiConfigured()) {
-      await R2Service.deleteClip(id, clip.deleteToken);
+    if (state.isUnlocked && state.passcode && isApiConfigured()) {
+      await R2Service.deleteClip(id, { passcode: state.passcode });
     }
   } catch (err) {
     console.error("Remote delete error:", err);
     if (card) card.classList.remove("removing");
+    if (err.status === 401) {
+      lockUploader("");
+      promptUnlockFocus("Passcode rejected. Please unlock again.");
+      return;
+    }
     showToast(err.message || "Could not delete clip from R2.", "error");
     return;
   }
 
   state.clips = state.clips.filter((c) => c.id !== id);
-  LocalHistory.save(state.clips);
 
   if (state.activeViewerClipId === id) {
     showViewerExpired(
@@ -989,19 +1048,21 @@ function startCountdownTicker() {
     const now = Date.now();
 
     // 1. Update uploader dashboard cards
-    for (const clip of [...state.clips]) {
-      const remaining = clip.expiresAt - now;
-      if (remaining <= 0) {
-        deleteClipById(clip.id, false);
-        showToast(`"${clip.name}" expired and was removed.`);
-        continue;
-      }
+    if (state.isUnlocked) {
+      for (const clip of [...state.clips]) {
+        const remaining = clip.expiresAt - now;
+        if (remaining <= 0) {
+          deleteClipById(clip.id, false);
+          showToast(`"${clip.name}" expired and was removed.`);
+          continue;
+        }
 
-      const chip = dom.clipList.querySelector(`[data-countdown-for="${CSS.escape(clip.id)}"]`);
-      if (chip) {
-        const textNode = chip.querySelector(".countdown-text");
-        if (textNode) textNode.textContent = formatCountdown(remaining);
-        chip.className = `countdown-chip ${getUrgencyClass(remaining)}`.trim();
+        const chip = dom.clipList.querySelector(`[data-countdown-for="${CSS.escape(clip.id)}"]`);
+        if (chip) {
+          const textNode = chip.querySelector(".countdown-text");
+          if (textNode) textNode.textContent = formatCountdown(remaining);
+          chip.className = `countdown-chip ${getUrgencyClass(remaining)}`.trim();
+        }
       }
     }
 
@@ -1041,9 +1102,9 @@ function bindEvents() {
     lockUploader("Uploader locked.");
   });
 
-  // Manual Storage Bar Refresh
+  // Manual Refresh syncs BOTH storage usage & active clips across devices
   dom.refreshStorageBtn.addEventListener("click", () => {
-    refreshStorageUsage({ showSpinner: true });
+    syncDashboardFromR2({ showSpinner: true });
   });
 
   // Drop Zone events
@@ -1110,15 +1171,17 @@ function bindEvents() {
   });
 
   dom.clearAllBtn.addEventListener("click", async () => {
+    if (!state.isUnlocked || !state.passcode) return;
     const toDelete = [...state.clips];
     await Promise.allSettled(
-      toDelete.map((clip) => R2Service.deleteClip(clip.id, clip.deleteToken))
+      toDelete.map((clip) =>
+        R2Service.deleteClip(clip.id, { passcode: state.passcode })
+      )
     );
     state.clips = [];
-    LocalHistory.save([]);
     renderClipList();
     refreshStorageUsage();
-    showToast("All clips permanently deleted.", "success");
+    showToast("All clips permanently deleted from R2.", "success");
   });
 
   // Viewer Navigation & Copy
@@ -1146,16 +1209,21 @@ function bindEvents() {
 }
 
 async function init() {
+  // Clean up legacy local clip cache from earlier version if present
+  try {
+    localStorage.removeItem(LEGACY_LOCAL_LIST_KEY);
+  } catch {
+    // Ignore storage restrictions
+  }
+
   dom.retentionLabel.textContent = formatRetentionHeader(EXPIRATION_MINUTES);
   setUploaderUnlocked(false);
   bindEvents();
 
-  state.clips = LocalHistory.load();
-  renderClipList();
   await handleRouteChange();
   startCountdownTicker();
 
-  // Silently re-verify saved passcode on this browser so you stay unlocked
+  // Silently re-verify saved passcode on this browser & sync R2 clips
   const savedCode = getStoredPasscode();
   if (savedCode && isApiConfigured()) {
     await verifyAndUnlock(savedCode, { silent: true });
