@@ -3,7 +3,7 @@
    1. EXPIRATION_MINUTES: Default clip lifetime in minutes (180 = 3 hours).
    2. API_BASE_URL: Your deployed Cloudflare Worker URL (no trailing slash).
    ========================================================================== */
-const EXPIRATION_MINUTES = 180;
+const EXPIRATION_MINUTES = 1440;
 const API_BASE_URL = "https://clipvault-api.faisal-n04.workers.dev";
 
 const GB = 1000 * 1000 * 1000; // Decimal GB to match Cloudflare R2 billing
