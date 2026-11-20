@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ClipVault</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+
+<body>
+  <div class="app-shell">
+    <!-- Header -->
+    <header class="topbar">
+      <a href="#" id="brandLink" class="brand" aria-label="ClipVault Home">
+        <span class="brand-mark" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="5 3 19 12 5 21 5 3"></polygon>
+          </svg>
+        </span>
+        <span class="brand-name">ClipVault</span>
+      </a>
+
+      <div class="topbar-meta">
+        <span class="retention-pill" id="retentionPill" title="Configured auto-deletion window">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="retentionLabel">Auto-deletes in 3h</span>
+        </span>
+      </div>
+    </header>
+
+    <!-- Main Uploader View -->
+    <main id="uploaderView" class="view">
+      <section class="hero">
+        <h1>Share clips that disappear automatically.</h1>
+        <p class="hero-sub">
+          Drop one or multiple video &amp; audio files to generate private links with a live self-destruct timer.
+        </p>
+      </section>
+
+      <!-- Drop Zone -->
+      <section class="upload-section" aria-label="Upload video or audio clips">
+        <div id="dropZone" class="drop-zone" role="button" tabindex="0" aria-describedby="dropZoneHint">
+          <input type="file" id="fileInput" accept="video/*,audio/*" multiple hidden />
+
+          <div class="drop-zone-icon" aria-hidden="true">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+              stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="17 8 12 3 7 8"></polyline>
+              <line x1="12" y1="3" x2="12" y2="15"></line>
+            </svg>
+          </div>
+
+          <p class="drop-zone-title">
+            Drag &amp; drop clips here, or <span class="accent-text">browse files</span>
+          </p>
+          <p id="dropZoneHint" class="drop-zone-hint">
+            Supports MP4, WebM, MOV, MP3, WAV, M4A, OGG &bull; Single or batch upload
+          </p>
+        </div>
+      </section>
+
+      <!-- Active Uploads Queue (Visible during batch processing) -->
+      <section id="uploadQueueSection" class="clips-section hidden" aria-label="Uploading files">
+        <div class="section-header">
+          <h2>Uploading</h2>
+          <span id="queueCount" class="count-badge">0</span>
+        </div>
+        <div id="uploadQueueList" class="clip-list"></div>
+      </section>
+
+      <!-- Active Clips List -->
+      <section class="clips-section" aria-label="Active shared clips">
+        <div class="section-header">
+          <div class="section-title-group">
+            <h2>Active Clips</h2>
+            <span id="activeCount" class="count-badge">0</span>
+          </div>
+
+          <div class="section-actions">
+            <button type="button" id="copyAllBtn" class="btn btn-ghost btn-sm hidden">
+              Copy All Links
+            </button>
+            <button type="button" id="clearAllBtn" class="btn btn-danger-ghost btn-sm hidden">
+              Delete All
+            </button>
+          </div>
+        </div>
+
+        <div id="emptyState" class="empty-state">
+          <p>No active clips yet. Upload video or audio files above to generate shareable links.</p>
+        </div>
+
+        <div id="clipList" class="clip-list"></div>
+      </section>
+    </main>
+
+    <!-- Dedicated Clip Viewer View -->
+    <main id="viewerView" class="view hidden" aria-label="Clip Viewer">
+      <div class="viewer-nav">
+        <button type="button" id="backToUploaderBtn" class="btn btn-ghost btn-sm">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="19" y1="12" x2="5" y2="12"></line>
+            <polyline points="12 19 5 12 12 5"></polyline>
+          </svg>
+          Upload New Clips
+        </button>
+      </div>
+
+      <!-- Active Media Card -->
+      <article id="viewerCard" class="viewer-card hidden">
+        <div class="viewer-header">
+          <div class="viewer-title-wrap">
+            <span id="viewerTypeBadge" class="media-badge">VIDEO</span>
+            <h1 id="viewerFileName" class="viewer-filename">clip.mp4</h1>
+            <p id="viewerMeta" class="viewer-meta">0 MB</p>
+          </div>
+
+          <div class="viewer-timer-box" id="viewerTimerBox">
+            <span class="timer-label">Expires in</span>
+            <span id="viewerCountdown" class="countdown-value">--:--:--</span>
+          </div>
+        </div>
+
+        <div id="viewerMediaStage" class="viewer-stage">
+          <!-- Video or Audio element injected dynamically -->
+        </div>
+
+        <div class="viewer-footer">
+          <div class="share-input-group">
+            <input type="text" id="viewerShareUrl" class="share-url-input" readonly aria-label="Shareable clip link" />
+            <button type="button" id="viewerCopyBtn" class="btn btn-primary">
+              Copy Link
+            </button>
+          </div>
+        </div>
+      </article>
+
+      <!-- Expired / Not Found Card -->
+      <article id="viewerExpiredCard" class="expired-card hidden">
+        <div class="expired-icon" aria-hidden="true">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+            stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"></circle>
+            <polyline points="12 6 12 12 16 14"></polyline>
+          </svg>
+        </div>
+        <h1 id="expiredTitle">This clip has expired</h1>
+        <p id="expiredMessage">
+          Its retention timer reached zero and the file was permanently deleted, or the link is invalid on this device.
+        </p>
+        <button type="button" id="expiredHomeBtn" class="btn btn-primary">
+          Upload a New Clip
+        </button>
+      </article>
+    </main>
+  </div>
+
+  <!-- Toast Container -->
+  <div id="toastContainer" class="toast-container" aria-live="polite" aria-atomic="true"></div>
+
+  <script src="app.js"></script>
+</body>
+
+</html>
