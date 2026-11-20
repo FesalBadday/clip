@@ -90,6 +90,43 @@
         </div>
       </section>
 
+      <!-- Live R2 Storage Usage Bar (Visible when unlocked) -->
+      <section id="storageBar" class="storage-bar hidden" aria-label="R2 Storage Usage">
+        <div class="storage-top">
+          <div class="storage-label-group">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+              stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+              <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+              <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+            </svg>
+            <span class="storage-title">R2 Bucket Storage</span>
+            <span id="storageReservedPill" class="storage-reserved-pill hidden">0 GB uploading</span>
+          </div>
+
+          <div class="storage-stats-group">
+            <span id="storageUsageText" class="storage-usage-text">-- / 9.00 GB</span>
+            <span id="storagePercentText" class="storage-percent-text">0%</span>
+            <button type="button" id="refreshStorageBtn" class="btn btn-ghost btn-icon-sm"
+              title="Refresh live R2 storage usage" aria-label="Refresh R2 storage usage">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <polyline points="23 4 23 10 17 10"></polyline>
+                <polyline points="1 20 1 14 7 14"></polyline>
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="storage-track" role="progressbar" id="storageProgressBar" aria-label="R2 storage usage percentage"
+          aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div id="storageProgressFill" class="storage-fill"></div>
+        </div>
+
+        <p id="storageSubtext" class="storage-subtext">Checking bucket usage...</p>
+      </section>
+
       <!-- Drop Zone -->
       <section class="upload-section" aria-label="Upload video or audio clips">
         <div id="dropZone" class="drop-zone is-locked" role="button" tabindex="0" aria-disabled="true"

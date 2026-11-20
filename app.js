@@ -6,6 +6,7 @@
 const EXPIRATION_MINUTES = 180;
 const API_BASE_URL = "https://clipvault-api.faisal-n04.workers.dev";
 
+const GB = 1000 * 1000 * 1000; // Decimal GB to match Cloudflare R2 billing
 const LOCAL_LIST_KEY = "clipvault_my_clips_v1";
 const PASSCODE_STORAGE_KEY = "clipvault_upload_passcode";
 
@@ -34,6 +35,15 @@ const dom = {
   unlockBtn: document.getElementById("unlockBtn"),
   authError: document.getElementById("authError"),
   lockBtn: document.getElementById("lockBtn"),
+
+  storageBar: document.getElementById("storageBar"),
+  storageReservedPill: document.getElementById("storageReservedPill"),
+  storageUsageText: document.getElementById("storageUsageText"),
+  storagePercentText: document.getElementById("storagePercentText"),
+  storageProgressBar: document.getElementById("storageProgressBar"),
+  storageProgressFill: document.getElementById("storageProgressFill"),
+  storageSubtext: document.getElementById("storageSubtext"),
+  refreshStorageBtn: document.getElementById("refreshStorageBtn"),
 
   dropZone: document.getElementById("dropZone"),
   fileInput: document.getElementById("fileInput"),
@@ -70,8 +80,6 @@ const dom = {
 
 /* ==========================================================================
    PASSCODE LOCK BAR & AUTHENTICATION (UPLOADER ONLY)
-   Verified against POST /api/auth/verify and remembered in localStorage.
-   Recipients opening #clip=... links never need a passcode.
    ========================================================================== */
 function getStoredPasscode() {
   try {
@@ -101,7 +109,7 @@ function showAuthError(message) {
   dom.authError.textContent = message;
   dom.authError.classList.remove("hidden");
   dom.authBar.classList.remove("is-shaking");
-  void dom.authBar.offsetWidth; // Restart animation
+  void dom.authBar.offsetWidth;
   dom.authBar.classList.add("is-shaking");
 }
 
@@ -117,6 +125,7 @@ function setUploaderUnlocked(unlocked, passcode = "") {
   dom.authBar.classList.toggle("is-unlocked", unlocked);
   dom.authLockedState.classList.toggle("hidden", unlocked);
   dom.authUnlockedState.classList.toggle("hidden", !unlocked);
+  dom.storageBar.classList.toggle("hidden", !unlocked);
 
   dom.dropZone.classList.toggle("is-locked", !unlocked);
   dom.dropZone.setAttribute("aria-disabled", String(!unlocked));
@@ -166,6 +175,7 @@ async function verifyAndUnlock(code, { silent = false } = {}) {
 
     saveStoredPasscode(trimmed);
     setUploaderUnlocked(true, trimmed);
+    refreshStorageUsage();
     if (!silent) showToast("Uploader unlocked.", "success");
     return true;
   } catch (err) {
@@ -182,6 +192,68 @@ async function verifyAndUnlock(code, { silent = false } = {}) {
 }
 
 /* ==========================================================================
+   LIVE R2 STORAGE USAGE BAR
+   ========================================================================== */
+function formatGigabytes(bytes) {
+  return (Math.max(0, bytes) / GB).toFixed(2);
+}
+
+function renderStorageUsage(data) {
+  const usedBytes = Number(data.usedBytes || 0);
+  const reservedBytes = Number(data.reservedBytes || 0);
+  const maxBytes = Number(data.maxBytes || 9 * GB);
+  const storedCount = Number(data.storedCount || 0);
+  const reservedCount = Number(data.reservedCount || 0);
+
+  const percent = maxBytes > 0 ? Math.min(100, (usedBytes / maxBytes) * 100) : 0;
+  const remainingBytes = Math.max(0, maxBytes - usedBytes);
+
+  dom.storageUsageText.textContent = `${formatGigabytes(usedBytes)} / ${formatGigabytes(maxBytes)} GB`;
+  dom.storagePercentText.textContent = `${Math.round(percent)}%`;
+  dom.storageProgressFill.style.width = `${percent.toFixed(1)}%`;
+  dom.storageProgressBar.setAttribute("aria-valuenow", String(Math.round(percent)));
+
+  dom.storageBar.classList.remove("is-warning", "is-critical");
+  if (percent >= 90) {
+    dom.storageBar.classList.add("is-critical");
+  } else if (percent >= 70) {
+    dom.storageBar.classList.add("is-warning");
+  }
+
+  if (reservedBytes > 0) {
+    dom.storageReservedPill.textContent = `${formatBytes(reservedBytes)} uploading`;
+    dom.storageReservedPill.classList.remove("hidden");
+  } else {
+    dom.storageReservedPill.classList.add("hidden");
+  }
+
+  const clipWord = storedCount === 1 ? "clip" : "clips";
+  const inFlightNote = reservedCount > 0 ? ` • ${reservedCount} in progress` : "";
+  dom.storageSubtext.textContent = `${formatGigabytes(remainingBytes)} GB available • ${storedCount} stored ${clipWord} in R2${inFlightNote}`;
+}
+
+async function refreshStorageUsage({ showSpinner = false } = {}) {
+  if (!state.isUnlocked || !state.passcode || !isApiConfigured()) return;
+
+  if (showSpinner) dom.refreshStorageBtn.classList.add("is-spinning");
+
+  try {
+    const usage = await R2Service.fetchStorageUsage(state.passcode);
+    renderStorageUsage(usage);
+  } catch (err) {
+    if (err.status === 401) {
+      lockUploader("");
+      promptUnlockFocus("Passcode rejected. Please unlock again.");
+      return;
+    }
+    console.error("Storage usage check failed:", err);
+    dom.storageSubtext.textContent = "Unable to load live storage usage right now.";
+  } finally {
+    if (showSpinner) dom.refreshStorageBtn.classList.remove("is-spinning");
+  }
+}
+
+/* ==========================================================================
    CLOUDFLARE R2 API SERVICE
    ========================================================================== */
 function getApiBase() {
@@ -190,6 +262,13 @@ function getApiBase() {
 
 function isApiConfigured() {
   return Boolean(API_BASE_URL) && !API_BASE_URL.includes("YOUR-WORKER-NAME");
+}
+
+class ApiError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.status = status;
+  }
 }
 
 const R2Service = {
@@ -202,8 +281,20 @@ const R2Service = {
     });
     if (res.status === 401) return false;
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || `Auth check failed (${res.status})`);
+    if (!res.ok) throw new ApiError(data.error || `Auth check failed (${res.status})`, res.status);
     return Boolean(data.ok);
+  },
+
+  async fetchStorageUsage(passcode) {
+    const res = await fetch(`${getApiBase()}/api/storage`, {
+      method: "GET",
+      headers: {
+        "X-Upload-Passcode": passcode
+      }
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new ApiError(data.error || `Storage check failed (${res.status})`, res.status);
+    return data;
   },
 
   async initUpload({ name, type, mediaKind, size }, passcode) {
@@ -226,9 +317,11 @@ const R2Service = {
     if (res.status === 401) {
       lockUploader("");
       promptUnlockFocus("Passcode rejected. Please unlock again.");
-      throw new Error("Upload passcode rejected.");
+      throw new ApiError("Upload passcode rejected.", 401);
     }
-    if (!res.ok) throw new Error(data.error || `Init failed (${res.status})`);
+    if (!res.ok) {
+      throw new ApiError(data.error || `Init failed (${res.status})`, res.status);
+    }
     return data; // { clip, uploadUrl }
   },
 
@@ -248,16 +341,16 @@ const R2Service = {
         if (xhr.status >= 200 && xhr.status < 300) {
           resolve();
         } else {
-          reject(new Error(`R2 upload failed (${xhr.status})`));
+          reject(new ApiError(`R2 upload failed (${xhr.status})`, xhr.status));
         }
       });
 
       xhr.addEventListener("error", () => {
-        reject(new Error("Upload blocked — check R2 bucket CORS policy."));
+        reject(new ApiError("Upload blocked — check R2 bucket CORS policy.", 0));
       });
 
       xhr.addEventListener("abort", () => {
-        reject(new Error("Upload cancelled."));
+        reject(new ApiError("Upload cancelled.", 0));
       });
 
       xhr.send(file);
@@ -270,7 +363,7 @@ const R2Service = {
       headers: { "X-Delete-Token": deleteToken }
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || `Finalize failed (${res.status})`);
+    if (!res.ok) throw new ApiError(data.error || `Finalize failed (${res.status})`, res.status);
     return data.clip;
   },
 
@@ -278,7 +371,7 @@ const R2Service = {
     const res = await fetch(`${getApiBase()}/api/clips/${encodeURIComponent(id)}`);
     if (res.status === 404) return null;
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || `Could not load clip (${res.status})`);
+    if (!res.ok) throw new ApiError(data.error || `Could not load clip (${res.status})`, res.status);
     return data; // { clip, mediaUrl }
   },
 
@@ -289,15 +382,13 @@ const R2Service = {
     });
     if (!res.ok && res.status !== 404) {
       const data = await res.json().catch(() => ({}));
-      throw new Error(data.error || `Delete failed (${res.status})`);
+      throw new ApiError(data.error || `Delete failed (${res.status})`, res.status);
     }
   }
 };
 
 /* ==========================================================================
    LOCAL DASHBOARD TRACKER (Uploader's Own Active Clips Only)
-   Media blobs live in R2; localStorage only remembers your uploaded links &
-   delete tokens so other visitors cannot see or delete your clips.
    ========================================================================== */
 const LocalHistory = {
   load() {
@@ -338,8 +429,8 @@ function getClipIdFromHash() {
 function formatBytes(bytes) {
   if (!bytes) return "0 B";
   const units = ["B", "KB", "MB", "GB"];
-  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  const value = bytes / Math.pow(1024, i);
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1000)), units.length - 1);
+  const value = bytes / Math.pow(1000, i);
   return `${value.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
@@ -403,7 +494,7 @@ function showToast(message, variant = "default") {
     toast.style.opacity = "0";
     toast.style.transition = "opacity 200ms ease";
     setTimeout(() => toast.remove(), 220);
-  }, 3000);
+  }, 3200);
 }
 
 function flashCopiedButton(button, originalLabel = "Copy Link") {
@@ -417,8 +508,16 @@ function flashCopiedButton(button, originalLabel = "Copy Link") {
 }
 
 /* ==========================================================================
-   SINGLE & BATCH UPLOAD FLOW (DIRECT TO CLOUDFLARE R2)
+   SINGLE & BATCH UPLOAD FLOW (SERIALIZED RESERVATION + PARALLEL R2 PUTS)
    ========================================================================== */
+let reservationChain = Promise.resolve();
+
+function enqueueReservation(taskFn) {
+  const run = reservationChain.then(taskFn, taskFn);
+  reservationChain = run.catch(() => { });
+  return run;
+}
+
 async function handleFilesSelected(fileList) {
   const files = Array.from(fileList || []);
   if (!files.length) return;
@@ -436,9 +535,77 @@ async function handleFilesSelected(fileList) {
   dom.uploadQueueSection.classList.remove("hidden");
   updateQueueCounter();
 
+  const entries = files.map((file) => ({
+    file,
+    ui: createUploadQueueRow(file.name)
+  }));
+
   const activePasscode = state.passcode;
-  const tasks = files.map((file) => processSingleUpload(file, activePasscode));
-  await Promise.allSettled(tasks);
+  const uploadTasks = [];
+  let authFailed = false;
+
+  // Reserve quota sequentially via /api/clips/init so batches cannot race past 9 GB
+  for (const { file, ui } of entries) {
+    if (authFailed) {
+      ui.setError("Locked");
+      ui.remove(2000);
+      continue;
+    }
+
+    const mediaKind = detectMediaKind(file);
+    if (!mediaKind) {
+      ui.setError("Unsupported file");
+      showToast(`Skipped "${file.name}" — video or audio files only.`, "error");
+      ui.remove(2600);
+      continue;
+    }
+
+    const contentType = file.type || (mediaKind === "video" ? "video/mp4" : "audio/mpeg");
+
+    try {
+      ui.setProgress(3, "Reserving...");
+      const reservation = await enqueueReservation(() =>
+        R2Service.initUpload(
+          {
+            name: file.name,
+            type: contentType,
+            mediaKind,
+            size: file.size
+          },
+          activePasscode
+        )
+      );
+
+      // Update bar immediately to show reserved bytes in flight
+      refreshStorageUsage();
+
+      uploadTasks.push(
+        uploadReservedFile({
+          file,
+          contentType,
+          clip: reservation.clip,
+          uploadUrl: reservation.uploadUrl,
+          ui
+        })
+      );
+    } catch (err) {
+      console.error("Reservation failed:", err);
+      if (err.status === 401) {
+        authFailed = true;
+        ui.setError("Passcode rejected");
+      } else if (err.status === 507) {
+        ui.setError("9 GB cap reached");
+        refreshStorageUsage();
+      } else {
+        ui.setError("Failed");
+      }
+      showToast(err.message || `Could not start "${file.name}".`, "error");
+      ui.remove(3600);
+    }
+  }
+
+  await Promise.allSettled(uploadTasks);
+  refreshStorageUsage();
 
   setTimeout(() => {
     if (dom.uploadQueueList.children.length === 0) {
@@ -446,6 +613,34 @@ async function handleFilesSelected(fileList) {
     }
     updateQueueCounter();
   }, 600);
+}
+
+async function uploadReservedFile({ file, contentType, clip, uploadUrl, ui }) {
+  try {
+    await R2Service.uploadDirectToR2(uploadUrl, file, contentType, (pct) => {
+      const scaled = 5 + pct * 0.9; // 5% -> 95%
+      ui.setProgress(scaled, `${Math.round(pct)}%`);
+    });
+
+    ui.setProgress(98, "Finalizing...");
+    const finalizedClip = await R2Service.completeUpload(clip.id, clip.deleteToken);
+
+    ui.setProgress(100, "Ready");
+    state.clips.unshift(finalizedClip);
+    LocalHistory.save(state.clips);
+    renderClipList();
+    refreshStorageUsage();
+    ui.remove(500);
+  } catch (err) {
+    console.error("Upload failed:", err);
+    ui.setError("Upload failed");
+    showToast(err.message || `Failed to upload "${file.name}".`, "error");
+
+    // Release pending R2 reservation immediately and refresh storage bar
+    await R2Service.deleteClip(clip.id, clip.deleteToken).catch(() => { });
+    refreshStorageUsage();
+    ui.remove(3200);
+  }
 }
 
 function createUploadQueueRow(fileName) {
@@ -461,7 +656,7 @@ function createUploadQueueRow(fileName) {
 
   const statusEl = document.createElement("span");
   statusEl.className = "upload-row-status";
-  statusEl.textContent = "Preparing...";
+  statusEl.textContent = "Queued...";
 
   const track = document.createElement("div");
   track.className = "progress-track";
@@ -499,56 +694,6 @@ function createUploadQueueRow(fileName) {
 
 function updateQueueCounter() {
   dom.queueCount.textContent = String(dom.uploadQueueList.children.length);
-}
-
-async function processSingleUpload(file, passcode) {
-  const ui = createUploadQueueRow(file.name);
-  const mediaKind = detectMediaKind(file);
-
-  if (!mediaKind) {
-    ui.setError("Unsupported file");
-    showToast(`Skipped "${file.name}" — video or audio files only.`, "error");
-    ui.remove(2600);
-    return;
-  }
-
-  const contentType = file.type || (mediaKind === "video" ? "video/mp4" : "audio/mpeg");
-
-  try {
-    ui.setProgress(3, "Preparing...");
-
-    // 1. Request presigned PUT URL from Worker
-    const { clip, uploadUrl } = await R2Service.initUpload(
-      {
-        name: file.name,
-        type: contentType,
-        mediaKind,
-        size: file.size
-      },
-      passcode
-    );
-
-    // 2. Upload file directly to Cloudflare R2 with real progress
-    await R2Service.uploadDirectToR2(uploadUrl, file, contentType, (pct) => {
-      const scaled = 5 + pct * 0.9; // 5% -> 95%
-      ui.setProgress(scaled, `${Math.round(pct)}%`);
-    });
-
-    // 3. Finalize clip metadata on Worker
-    ui.setProgress(98, "Finalizing...");
-    const finalizedClip = await R2Service.completeUpload(clip.id, clip.deleteToken);
-
-    ui.setProgress(100, "Ready");
-    state.clips.unshift(finalizedClip);
-    LocalHistory.save(state.clips);
-    renderClipList();
-    ui.remove(500);
-  } catch (err) {
-    console.error("Upload failed:", err);
-    ui.setError("Failed");
-    showToast(err.message || `Failed to upload "${file.name}".`, "error");
-    ui.remove(3200);
-  }
 }
 
 /* ==========================================================================
@@ -709,6 +854,7 @@ async function handleRouteChange() {
     dom.uploaderView.classList.remove("hidden");
     state.clips = LocalHistory.load();
     renderClipList();
+    if (state.isUnlocked) refreshStorageUsage();
     return;
   }
 
@@ -832,6 +978,7 @@ async function deleteClipById(id, notify = false) {
   }
 
   setTimeout(() => renderClipList(), card ? 220 : 0);
+  refreshStorageUsage();
   if (notify) showToast("Clip permanently deleted from R2.", "success");
 }
 
@@ -892,6 +1039,11 @@ function bindEvents() {
 
   dom.lockBtn.addEventListener("click", () => {
     lockUploader("Uploader locked.");
+  });
+
+  // Manual Storage Bar Refresh
+  dom.refreshStorageBtn.addEventListener("click", () => {
+    refreshStorageUsage({ showSpinner: true });
   });
 
   // Drop Zone events
@@ -965,6 +1117,7 @@ function bindEvents() {
     state.clips = [];
     LocalHistory.save([]);
     renderClipList();
+    refreshStorageUsage();
     showToast("All clips permanently deleted.", "success");
   });
 
