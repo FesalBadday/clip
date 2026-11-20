@@ -9,6 +9,7 @@ const API_BASE_URL = "https://clipvault-api.faisal-n04.workers.dev";
 const GB = 1000 * 1000 * 1000; // Decimal GB to match Cloudflare R2 billing
 const THUMB_WIDTH = 480;
 const THUMB_HEIGHT = 270;
+const TAB_SYNC_COOLDOWN_MS = 15000;
 const LEGACY_LOCAL_LIST_KEY = "clipvault_my_clips_v1";
 const PASSCODE_STORAGE_KEY = "clipvault_upload_passcode";
 
@@ -18,6 +19,7 @@ const PASSCODE_STORAGE_KEY = "clipvault_upload_passcode";
 const state = {
   clips: [],
   loadingClips: false,
+  lastSyncAt: 0,
   activeViewerClipId: null,
   isUnlocked: false,
   passcode: "",
@@ -200,8 +202,6 @@ async function verifyAndUnlock(code, { silent = false } = {}) {
 
 /* ==========================================================================
    AUTOMATIC VIDEO THUMBNAIL & DURATION EXTRACTION
-   Captures a 16:9 JPEG frame (~15–30 KB) from the video before uploading.
-   Gracefully falls back if a browser cannot decode the video codec locally.
    ========================================================================== */
 function extractMediaMetadata(file, mediaKind) {
   if (mediaKind === "audio") {
@@ -264,7 +264,6 @@ function extractVideoThumbnailAndDuration(file) {
         const vw = video.videoWidth;
         const vh = video.videoHeight;
         const videoRatio = vw / vh;
-        const canvasRatio = THUMB_WIDTH / THUMB_HEIGHT;
 
         ctx.fillStyle = "#07080d";
         ctx.fillRect(0, 0, THUMB_WIDTH, THUMB_HEIGHT);
@@ -315,7 +314,6 @@ function extractVideoThumbnailAndDuration(file) {
       resolve({ duration, thumbnail });
     };
 
-    // Never stall upload if a codec fails to decode in browser
     const timeoutId = setTimeout(() => {
       const fallbackFrame = video.readyState >= 2 ? captureFrame() : null;
       finish(fallbackFrame);
@@ -327,7 +325,6 @@ function extractVideoThumbnailAndDuration(file) {
 
     video.onloadedmetadata = () => {
       const dur = video.duration;
-      // Pick a frame ~20% in (capped at 3s) to avoid black intro fade-ins
       const targetTime =
         Number.isFinite(dur) && dur > 0.5 ? Math.min(dur * 0.2, 3) : 0;
 
@@ -345,7 +342,6 @@ function extractVideoThumbnailAndDuration(file) {
     };
 
     video.onloadeddata = () => {
-      // If clip is too short to seek past 0s, capture the first decoded frame
       const dur = video.duration;
       if (!Number.isFinite(dur) || dur <= 0.5) {
         finish(captureFrame());
@@ -442,6 +438,7 @@ async function syncActiveClipsFromR2() {
 
 async function syncDashboardFromR2({ showSpinner = false } = {}) {
   if (!state.isUnlocked || !state.passcode || !isApiConfigured()) return;
+  state.lastSyncAt = Date.now();
   if (showSpinner) dom.refreshStorageBtn.classList.add("is-spinning");
 
   try {
@@ -587,6 +584,18 @@ const R2Service = {
     return data; // { clip, mediaUrl }
   },
 
+  async markClipWatched(id, ownerPasscode = "") {
+    const headers = {};
+    if (ownerPasscode) headers["X-Upload-Passcode"] = ownerPasscode;
+
+    // Best-effort fire-and-forget ping; never disrupt playback on failure
+    await fetch(`${getApiBase()}/api/clips/${encodeURIComponent(id)}/watched`, {
+      method: "POST",
+      headers,
+      keepalive: true
+    }).catch(() => { });
+  },
+
   async deleteClip(id, { passcode = "", deleteToken = "" } = {}) {
     const headers = {};
     if (passcode) headers["X-Upload-Passcode"] = passcode;
@@ -632,6 +641,13 @@ function formatDuration(totalSeconds) {
   const rem = secs % 60;
   const pad = (n) => String(n).padStart(2, "0");
   return hrs > 0 ? `${hrs}:${pad(mins)}:${pad(rem)}` : `${mins}:${pad(rem)}`;
+}
+
+function formatShortTime(timestamp) {
+  return new Date(timestamp).toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit"
+  });
 }
 
 function formatCountdown(msRemaining) {
@@ -762,11 +778,9 @@ async function handleFilesSelected(fileList) {
     const contentType = file.type || (mediaKind === "video" ? "video/mp4" : "audio/mpeg");
 
     try {
-      // 1. Auto-extract video thumbnail & duration locally before reserving
       ui.setProgress(2, mediaKind === "video" ? "Creating thumbnail..." : "Reading audio...");
       const { duration, thumbnail } = await extractMediaMetadata(file, mediaKind);
 
-      // 2. Reserve quota sequentially via /api/clips/init so batches cannot race past 9 GB
       ui.setProgress(4, "Reserving...");
       const reservation = await enqueueReservation(() =>
         R2Service.initUpload(
@@ -784,7 +798,6 @@ async function handleFilesSelected(fileList) {
 
       refreshStorageUsage();
 
-      // 3. Upload file directly to R2 in parallel
       uploadTasks.push(
         uploadReservedFile({
           file,
@@ -907,7 +920,7 @@ function updateQueueCounter() {
 }
 
 /* ==========================================================================
-   YOUTUBE-STYLE CLIP GRID RENDERING
+   YOUTUBE-STYLE CLIP GRID RENDERING (WITH WATCHED STATUS)
    ========================================================================== */
 function setEmptyStateMessage(message) {
   const p = dom.emptyState.querySelector("p");
@@ -962,12 +975,14 @@ function createClipCard(clip) {
   const remaining = clip.expiresAt - Date.now();
   const isAudio = clip.mediaKind === "audio";
   const durationLabel = formatDuration(clip.duration);
+  const isWatched = Boolean(clip.watched);
+  const watchCount = Number(clip.watchCount || 0);
 
   const card = document.createElement("article");
-  card.className = "clip-card";
+  card.className = `clip-card ${isWatched ? "is-watched" : ""}`.trim();
   card.dataset.clipId = clip.id;
 
-  // 1. Clickable 16:9 Thumbnail Area (YouTube Style)
+  // 1. Clickable 16:9 Thumbnail Area
   const thumbLink = document.createElement("a");
   thumbLink.className = "thumb-link";
   thumbLink.href = clipHash;
@@ -1027,7 +1042,25 @@ function createClipCard(clip) {
   `;
   thumbLink.appendChild(countdownPill);
 
-  // Video / Audio Duration Pill (Bottom-Right of Thumbnail, YouTube Style)
+  // Watched Badge (Top-Right of Thumbnail)
+  if (isWatched) {
+    const watchedPill = document.createElement("div");
+    watchedPill.className = "thumb-watched";
+    const watchedTime = clip.lastWatchedAt ? formatShortTime(clip.lastWatchedAt) : "";
+    const countLabel = watchCount > 1 ? ` · ${watchCount}` : "";
+    watchedPill.title = watchedTime
+      ? `Watched by customer (${watchCount || 1}x, last at ${watchedTime})`
+      : "Watched by customer";
+    watchedPill.innerHTML = `
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <polyline points="20 6 9 17 4 12"></polyline>
+      </svg>
+      <span>Watched${countLabel}</span>
+    `;
+    thumbLink.appendChild(watchedPill);
+  }
+
+  // Video / Audio Duration Pill (Bottom-Right of Thumbnail)
   if (durationLabel) {
     const durBadge = document.createElement("span");
     durBadge.className = "thumb-duration";
@@ -1059,13 +1092,18 @@ function createClipCard(clip) {
   sep.className = "meta-sep";
   sep.textContent = "•";
 
-  const uploadedEl = document.createElement("span");
-  uploadedEl.textContent = new Date(clip.createdAt).toLocaleTimeString([], {
-    hour: "numeric",
-    minute: "2-digit"
-  });
+  const statusMeta = document.createElement("span");
+  if (isWatched && clip.lastWatchedAt) {
+    statusMeta.className = "watched-meta-text";
+    statusMeta.textContent = `Watched ${formatShortTime(clip.lastWatchedAt)}`;
+  } else if (isWatched) {
+    statusMeta.className = "watched-meta-text";
+    statusMeta.textContent = "Watched";
+  } else {
+    statusMeta.textContent = formatShortTime(clip.createdAt);
+  }
 
-  submeta.append(badge, sizeEl, sep, uploadedEl);
+  submeta.append(badge, sizeEl, sep, statusMeta);
 
   const shareStack = document.createElement("div");
   shareStack.className = "clip-share-stack";
@@ -1172,6 +1210,18 @@ async function handleRouteChange() {
   }
 }
 
+function attachWatchedListener(mediaEl, clipId) {
+  let reported = false;
+
+  // Fires once playback actually starts (ignores link preview bots & owner previews)
+  mediaEl.addEventListener("playing", () => {
+    if (reported) return;
+    reported = true;
+    const ownerPasscode = state.passcode || getStoredPasscode();
+    R2Service.markClipWatched(clipId, ownerPasscode);
+  });
+}
+
 function renderActiveViewer(clip, mediaUrl) {
   dom.viewerExpiredCard.classList.add("hidden");
   dom.viewerCard.classList.remove("hidden");
@@ -1186,12 +1236,7 @@ function renderActiveViewer(clip, mediaUrl) {
 
   const metaParts = [formatBytes(clip.size)];
   if (durationLabel) metaParts.push(durationLabel);
-  metaParts.push(
-    `Uploaded ${new Date(clip.createdAt).toLocaleTimeString([], {
-      hour: "numeric",
-      minute: "2-digit"
-    })}`
-  );
+  metaParts.push(`Uploaded ${formatShortTime(clip.createdAt)}`);
   dom.viewerMeta.textContent = metaParts.join(" • ");
 
   dom.viewerCountdown.textContent = formatCountdown(remaining);
@@ -1216,6 +1261,7 @@ function renderActiveViewer(clip, mediaUrl) {
     audio.controls = true;
     audio.preload = "metadata";
     audio.src = mediaUrl;
+    attachWatchedListener(audio, clip.id);
     wrapper.appendChild(audio);
     dom.viewerMediaStage.appendChild(wrapper);
   } else {
@@ -1225,6 +1271,7 @@ function renderActiveViewer(clip, mediaUrl) {
     video.preload = "metadata";
     if (clip.thumbnail) video.poster = clip.thumbnail;
     video.src = mediaUrl;
+    attachWatchedListener(video, clip.id);
     dom.viewerMediaStage.appendChild(video);
   }
 }
@@ -1280,7 +1327,6 @@ function startCountdownTicker() {
   state.tickerId = setInterval(() => {
     const now = Date.now();
 
-    // 1. Update uploader dashboard YouTube card countdowns
     if (state.isUnlocked) {
       for (const clip of [...state.clips]) {
         const remaining = clip.expiresAt - now;
@@ -1299,7 +1345,6 @@ function startCountdownTicker() {
       }
     }
 
-    // 2. Update active viewer countdown
     if (state.activeViewerClipId && !dom.viewerCard.classList.contains("hidden")) {
       const expiresAt = Number(dom.viewerTimerBox.dataset.expiresAt || 0);
       const remaining = expiresAt - now;
@@ -1335,9 +1380,21 @@ function bindEvents() {
     lockUploader("Uploader locked.");
   });
 
-  // Manual Refresh syncs BOTH storage usage & active clips across devices
+  // Manual Refresh syncs storage usage, clips, & watched statuses
   dom.refreshStorageBtn.addEventListener("click", () => {
     syncDashboardFromR2({ showSpinner: true });
+  });
+
+  // Auto-sync watched badges when returning to the dashboard tab
+  document.addEventListener("visibilitychange", () => {
+    if (
+      !document.hidden &&
+      state.isUnlocked &&
+      !state.activeViewerClipId &&
+      Date.now() - state.lastSyncAt > TAB_SYNC_COOLDOWN_MS
+    ) {
+      syncDashboardFromR2();
+    }
   });
 
   // Drop Zone events
@@ -1455,7 +1512,6 @@ async function init() {
   await handleRouteChange();
   startCountdownTicker();
 
-  // Silently re-verify saved passcode on this browser & sync R2 clips
   const savedCode = getStoredPasscode();
   if (savedCode && isApiConfigured()) {
     await verifyAndUnlock(savedCode, { silent: true });
