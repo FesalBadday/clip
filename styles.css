@@ -585,11 +585,15 @@ body {
   border: 1px solid var(--border-subtle);
   box-shadow: var(--shadow-card);
   overflow: hidden;
-  transition: border-color var(--transition), transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity 220ms ease, box-shadow 220ms ease;
+  transition: border-color var(--transition), transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity 220ms ease, box-shadow 220ms ease, background var(--transition);
 }
 
 .clip-card.is-watched {
-  border-color: rgba(34, 197, 94, 0.24);
+  border-color: rgba(34, 197, 94, 0.26);
+}
+
+.clip-card.is-self-watched {
+  background: #0d0f16;
 }
 
 .clip-card:hover {
@@ -599,7 +603,7 @@ body {
 }
 
 .clip-card.is-watched:hover {
-  border-color: rgba(34, 197, 94, 0.45);
+  border-color: rgba(34, 197, 94, 0.48);
 }
 
 .clip-card.removing {
@@ -624,7 +628,7 @@ body {
   height: 100%;
   object-fit: cover;
   display: block;
-  transition: transform 280ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  transition: transform 280ms cubic-bezier(0.2, 0.8, 0.2, 1), filter 260ms ease, opacity 260ms ease;
 }
 
 .clip-card:hover .thumb-img {
@@ -644,7 +648,7 @@ body {
     radial-gradient(circle at 50% 42%, rgba(109, 106, 255, 0.24), transparent 62%),
     linear-gradient(145deg, #131624, #090b12);
   color: var(--accent-hover);
-  transition: transform 280ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  transition: transform 280ms cubic-bezier(0.2, 0.8, 0.2, 1), filter 260ms ease, opacity 260ms ease;
 }
 
 .thumb-placeholder.is-audio {
@@ -656,6 +660,36 @@ body {
 
 .clip-card:hover .thumb-placeholder {
   transform: scale(1.03);
+}
+
+/* Grayed-out visual state for clips YOU already watched on this browser
+   (keeps the green customer Watched badge vibrant in the top-right corner) */
+.clip-card.is-self-watched .thumb-img,
+.clip-card.is-self-watched .thumb-placeholder {
+  filter: grayscale(85%) brightness(0.62);
+  opacity: 0.88;
+}
+
+.clip-card.is-self-watched:hover .thumb-img,
+.clip-card.is-self-watched:hover .thumb-placeholder {
+  filter: grayscale(15%) brightness(0.94);
+  opacity: 1;
+}
+
+.clip-card.is-self-watched .clip-title-link {
+  color: var(--text-secondary);
+}
+
+.clip-card.is-self-watched:hover .clip-title-link {
+  color: var(--text-primary);
+}
+
+.clip-card.is-self-watched .btn-primary:not(.copied) {
+  opacity: 0.82;
+}
+
+.clip-card.is-self-watched:hover .btn-primary:not(.copied) {
+  opacity: 1;
 }
 
 .audio-bars {
@@ -774,6 +808,7 @@ body {
   animation: pulse-urgent 1.2s ease-in-out infinite;
 }
 
+/* Customer Watched Green Badge (Top-Right) */
 .thumb-watched {
   position: absolute;
   top: 10px;
@@ -784,14 +819,33 @@ body {
   gap: 4px;
   padding: 4px 8px;
   border-radius: 7px;
-  background: rgba(6, 78, 59, 0.88);
-  border: 1px solid rgba(34, 197, 94, 0.55);
+  background: rgba(6, 78, 59, 0.9);
+  border: 1px solid rgba(34, 197, 94, 0.6);
   backdrop-filter: blur(8px);
   font-size: 0.72rem;
   font-weight: 700;
   letter-spacing: 0.01em;
   color: #86efac;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+}
+
+/* Self-Watched Pill (Bottom-Left) */
+.thumb-self-watched {
+  position: absolute;
+  left: 10px;
+  bottom: 10px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: rgba(15, 17, 26, 0.84);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  backdrop-filter: blur(6px);
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: #cbd5e1;
 }
 
 .thumb-duration {
@@ -807,6 +861,22 @@ body {
   font-weight: 600;
   letter-spacing: 0.02em;
   color: #ffffff;
+}
+
+/* YouTube-Style Watched Progress Bar at Bottom Edge of Thumbnail */
+.thumb-progress-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 3.5px;
+  z-index: 3;
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.thumb-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), #94a3b8);
 }
 
 @keyframes pulse-urgent {
@@ -879,6 +949,24 @@ body {
 .media-badge.is-audio {
   background: rgba(56, 189, 248, 0.14);
   color: #38bdf8;
+}
+
+/* Viewer Self-Watched Pill (Shown next to VIDEO/AUDIO badge if already watched) */
+.viewer-self-watched-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 5px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  color: var(--text-secondary);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  vertical-align: middle;
 }
 
 /* Share Input & Action Row inside YouTube Card */

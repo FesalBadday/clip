@@ -12,6 +12,7 @@ const THUMB_HEIGHT = 270;
 const TAB_SYNC_COOLDOWN_MS = 15000;
 const LEGACY_LOCAL_LIST_KEY = "clipvault_my_clips_v1";
 const PASSCODE_STORAGE_KEY = "clipvault_upload_passcode";
+const SELF_WATCHED_STORAGE_KEY = "clipvault_self_watched_v1";
 
 /* ==========================================================================
    STATE & DOM REFERENCES
@@ -81,6 +82,92 @@ const dom = {
   expiredHomeBtn: document.getElementById("expiredHomeBtn"),
 
   toastContainer: document.getElementById("toastContainer")
+};
+
+/* ==========================================================================
+   LOCAL SELF-WATCHED HISTORY (PER-BROWSER)
+   Tracks clips played on THIS browser (both your own and other uploaded clips)
+   so they appear grayed out with a progress bar without affecting the green
+   customer Watched badge. Expired clip IDs are auto-pruned.
+   ========================================================================== */
+const SelfWatchedHistory = {
+  loadAll() {
+    try {
+      const raw = localStorage.getItem(SELF_WATCHED_STORAGE_KEY);
+      const parsed = raw ? JSON.parse(raw) : {};
+      if (!parsed || typeof parsed !== "object") return {};
+
+      const now = Date.now();
+      let changed = false;
+      const cleaned = {};
+
+      for (const [id, entry] of Object.entries(parsed)) {
+        if (entry && (!entry.expiresAt || entry.expiresAt > now)) {
+          cleaned[id] = entry;
+        } else {
+          changed = true;
+        }
+      }
+
+      if (changed) this.saveAll(cleaned);
+      return cleaned;
+    } catch {
+      return {};
+    }
+  },
+
+  saveAll(map) {
+    try {
+      localStorage.setItem(SELF_WATCHED_STORAGE_KEY, JSON.stringify(map));
+    } catch {
+      // Ignore storage quota issues
+    }
+  },
+
+  get(clipId) {
+    const map = this.loadAll();
+    return map[clipId] || null;
+  },
+
+  mark(clipId, expiresAt, progress = 0.15) {
+    if (!clipId) return null;
+    const map = this.loadAll();
+    const existing = map[clipId];
+    const safeProgress = Math.max(
+      existing ? Number(existing.progress || 0) : 0,
+      Math.min(1, Math.max(0.12, Number(progress) || 0.15))
+    );
+
+    const record = {
+      watchedAt: Date.now(),
+      expiresAt: Number(expiresAt) || Date.now() + 7 * 24 * 60 * 60 * 1000,
+      progress: safeProgress
+    };
+
+    map[clipId] = record;
+    this.saveAll(map);
+    return record;
+  },
+
+  remove(clipId) {
+    const map = this.loadAll();
+    if (clipId in map) {
+      delete map[clipId];
+      this.saveAll(map);
+    }
+  },
+
+  removeMany(ids) {
+    const map = this.loadAll();
+    let changed = false;
+    for (const id of ids) {
+      if (id in map) {
+        delete map[id];
+        changed = true;
+      }
+    }
+    if (changed) this.saveAll(map);
+  }
 };
 
 /* ==========================================================================
@@ -269,7 +356,6 @@ function extractVideoThumbnailAndDuration(file) {
         ctx.fillRect(0, 0, THUMB_WIDTH, THUMB_HEIGHT);
 
         if (videoRatio < 1.25) {
-          // Portrait or square clip: dimmed ambient backdrop + crisp centered video
           const coverScale = Math.max(THUMB_WIDTH / vw, THUMB_HEIGHT / vh);
           const cw = vw * coverScale;
           const ch = vh * coverScale;
@@ -285,7 +371,6 @@ function extractVideoThumbnailAndDuration(file) {
           const fh = vh * fitScale;
           ctx.drawImage(video, (THUMB_WIDTH - fw) / 2, (THUMB_HEIGHT - fh) / 2, fw, fh);
         } else {
-          // Landscape clip: full 16:9 cover crop like YouTube
           const scale = Math.max(THUMB_WIDTH / vw, THUMB_HEIGHT / vh);
           const dw = vw * scale;
           const dh = vh * scale;
@@ -588,7 +673,6 @@ const R2Service = {
     const headers = {};
     if (ownerPasscode) headers["X-Upload-Passcode"] = ownerPasscode;
 
-    // Best-effort fire-and-forget ping; never disrupt playback on failure
     await fetch(`${getApiBase()}/api/clips/${encodeURIComponent(id)}/watched`, {
       method: "POST",
       headers,
@@ -920,7 +1004,7 @@ function updateQueueCounter() {
 }
 
 /* ==========================================================================
-   YOUTUBE-STYLE CLIP GRID RENDERING (WITH WATCHED STATUS)
+   YOUTUBE-STYLE CLIP GRID RENDERING (CUSTOMER WATCHED + SELF-WATCHED)
    ========================================================================== */
 function setEmptyStateMessage(message) {
   const p = dom.emptyState.querySelector("p");
@@ -960,26 +1044,32 @@ function renderClipList() {
 
   dom.emptyState.classList.add("hidden");
   dom.clipList.innerHTML = "";
+  const selfWatchedMap = SelfWatchedHistory.loadAll();
   const fragment = document.createDocumentFragment();
 
   for (const clip of state.clips) {
-    fragment.appendChild(createClipCard(clip));
+    fragment.appendChild(createClipCard(clip, selfWatchedMap[clip.id] || null));
   }
 
   dom.clipList.appendChild(fragment);
 }
 
-function createClipCard(clip) {
+function createClipCard(clip, selfWatchedRecord) {
   const shareUrl = buildShareUrl(clip.id);
   const clipHash = `#clip=${encodeURIComponent(clip.id)}`;
   const remaining = clip.expiresAt - Date.now();
   const isAudio = clip.mediaKind === "audio";
   const durationLabel = formatDuration(clip.duration);
-  const isWatched = Boolean(clip.watched);
+  const isCustomerWatched = Boolean(clip.watched);
+  const isSelfWatched = Boolean(selfWatchedRecord);
   const watchCount = Number(clip.watchCount || 0);
 
+  const cardClasses = ["clip-card"];
+  if (isCustomerWatched) cardClasses.push("is-watched");
+  if (isSelfWatched) cardClasses.push("is-self-watched");
+
   const card = document.createElement("article");
-  card.className = `clip-card ${isWatched ? "is-watched" : ""}`.trim();
+  card.className = cardClasses.join(" ");
   card.dataset.clipId = clip.id;
 
   // 1. Clickable 16:9 Thumbnail Area
@@ -1042,8 +1132,8 @@ function createClipCard(clip) {
   `;
   thumbLink.appendChild(countdownPill);
 
-  // Watched Badge (Top-Right of Thumbnail)
-  if (isWatched) {
+  // Customer Watched Green Badge (Top-Right of Thumbnail)
+  if (isCustomerWatched) {
     const watchedPill = document.createElement("div");
     watchedPill.className = "thumb-watched";
     const watchedTime = clip.lastWatchedAt ? formatShortTime(clip.lastWatchedAt) : "";
@@ -1058,6 +1148,33 @@ function createClipCard(clip) {
       <span>Watched${countLabel}</span>
     `;
     thumbLink.appendChild(watchedPill);
+  }
+
+  // Self-Watched Pill (Bottom-Left) + YouTube-Style Progress Bar
+  if (isSelfWatched) {
+    const selfPill = document.createElement("div");
+    selfPill.className = "thumb-self-watched";
+    selfPill.title = `You watched this clip at ${formatShortTime(selfWatchedRecord.watchedAt)}`;
+    selfPill.innerHTML = `
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+        <circle cx="12" cy="12" r="3"></circle>
+      </svg>
+      <span>You watched</span>
+    `;
+    thumbLink.appendChild(selfPill);
+
+    const progressTrack = document.createElement("div");
+    progressTrack.className = "thumb-progress-track";
+    progressTrack.setAttribute("aria-hidden", "true");
+
+    const progressFill = document.createElement("div");
+    progressFill.className = "thumb-progress-fill";
+    const pct = Math.round(Math.min(1, Math.max(0.15, Number(selfWatchedRecord.progress) || 0.2)) * 100);
+    progressFill.style.width = `${pct}%`;
+
+    progressTrack.appendChild(progressFill);
+    thumbLink.appendChild(progressTrack);
   }
 
   // Video / Audio Duration Pill (Bottom-Right of Thumbnail)
@@ -1093,10 +1210,10 @@ function createClipCard(clip) {
   sep.textContent = "•";
 
   const statusMeta = document.createElement("span");
-  if (isWatched && clip.lastWatchedAt) {
+  if (isCustomerWatched && clip.lastWatchedAt) {
     statusMeta.className = "watched-meta-text";
     statusMeta.textContent = `Watched ${formatShortTime(clip.lastWatchedAt)}`;
-  } else if (isWatched) {
+  } else if (isCustomerWatched) {
     statusMeta.className = "watched-meta-text";
     statusMeta.textContent = "Watched";
   } else {
@@ -1151,7 +1268,31 @@ function createClipCard(clip) {
 /* ==========================================================================
    DEDICATED CROSS-DEVICE VIEWER ROUTING (PUBLIC — NO PASSCODE NEEDED)
    ========================================================================== */
+function clearViewerSelfWatchedBadge() {
+  const existing = document.getElementById("viewerSelfWatchedBadge");
+  if (existing) existing.remove();
+}
+
+function showViewerSelfWatchedBadge(watchedAt) {
+  clearViewerSelfWatchedBadge();
+  const pill = document.createElement("span");
+  pill.id = "viewerSelfWatchedBadge";
+  pill.className = "viewer-self-watched-badge";
+  if (watchedAt) {
+    pill.title = `You watched this clip at ${formatShortTime(watchedAt)}`;
+  }
+  pill.innerHTML = `
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+      <circle cx="12" cy="12" r="3"></circle>
+    </svg>
+    <span>Watched by you</span>
+  `;
+  dom.viewerTypeBadge.insertAdjacentElement("afterend", pill);
+}
+
 function cleanupViewerMedia() {
+  clearViewerSelfWatchedBadge();
   const mediaEl = dom.viewerMediaStage.querySelector("video, audio");
   if (mediaEl) {
     mediaEl.pause();
@@ -1210,15 +1351,50 @@ async function handleRouteChange() {
   }
 }
 
-function attachWatchedListener(mediaEl, clipId) {
-  let reported = false;
+function attachWatchedListeners(mediaEl, clip) {
+  let reportedToServer = false;
+  let lastProgressSaveAt = 0;
 
-  // Fires once playback actually starts (ignores link preview bots & owner previews)
+  const saveSelfProgress = (force = false) => {
+    const now = Date.now();
+    if (!force && now - lastProgressSaveAt < 2000) return;
+    lastProgressSaveAt = now;
+
+    let ratio = 0.2;
+    if (Number.isFinite(mediaEl.duration) && mediaEl.duration > 0) {
+      ratio = mediaEl.currentTime / mediaEl.duration;
+      if (ratio >= 0.92) ratio = 1;
+    }
+    SelfWatchedHistory.mark(clip.id, clip.expiresAt, ratio);
+  };
+
   mediaEl.addEventListener("playing", () => {
-    if (reported) return;
-    reported = true;
-    const ownerPasscode = state.passcode || getStoredPasscode();
-    R2Service.markClipWatched(clipId, ownerPasscode);
+    // 1. Always mark locally for THIS user (whether owner or customer)
+    const record = SelfWatchedHistory.mark(clip.id, clip.expiresAt, 0.2);
+    showViewerSelfWatchedBadge(record?.watchedAt);
+
+    // 2. Report to R2 once per visit (Worker ignores owner passcode automatically)
+    if (!reportedToServer) {
+      reportedToServer = true;
+      const ownerPasscode = state.passcode || getStoredPasscode();
+      R2Service.markClipWatched(clip.id, ownerPasscode);
+    }
+  });
+
+  mediaEl.addEventListener("timeupdate", () => {
+    if (!mediaEl.paused && mediaEl.currentTime > 0) {
+      saveSelfProgress(false);
+    }
+  });
+
+  mediaEl.addEventListener("pause", () => {
+    if (mediaEl.currentTime > 0) {
+      saveSelfProgress(true);
+    }
+  });
+
+  mediaEl.addEventListener("ended", () => {
+    SelfWatchedHistory.mark(clip.id, clip.expiresAt, 1);
   });
 }
 
@@ -1232,6 +1408,15 @@ function renderActiveViewer(clip, mediaUrl) {
 
   dom.viewerTypeBadge.textContent = isAudio ? "Audio" : "Video";
   dom.viewerTypeBadge.className = `media-badge ${isAudio ? "is-audio" : ""}`.trim();
+
+  // If this browser already watched this clip earlier, show the indicator right away
+  const previousSelfWatch = SelfWatchedHistory.get(clip.id);
+  if (previousSelfWatch) {
+    showViewerSelfWatchedBadge(previousSelfWatch.watchedAt);
+  } else {
+    clearViewerSelfWatchedBadge();
+  }
+
   dom.viewerFileName.textContent = clip.name;
 
   const metaParts = [formatBytes(clip.size)];
@@ -1261,7 +1446,7 @@ function renderActiveViewer(clip, mediaUrl) {
     audio.controls = true;
     audio.preload = "metadata";
     audio.src = mediaUrl;
-    attachWatchedListener(audio, clip.id);
+    attachWatchedListeners(audio, clip);
     wrapper.appendChild(audio);
     dom.viewerMediaStage.appendChild(wrapper);
   } else {
@@ -1271,7 +1456,7 @@ function renderActiveViewer(clip, mediaUrl) {
     video.preload = "metadata";
     if (clip.thumbnail) video.poster = clip.thumbnail;
     video.src = mediaUrl;
-    attachWatchedListener(video, clip.id);
+    attachWatchedListeners(video, clip);
     dom.viewerMediaStage.appendChild(video);
   }
 }
@@ -1308,6 +1493,7 @@ async function deleteClipById(id, notify = false) {
   }
 
   state.clips = state.clips.filter((c) => c.id !== id);
+  SelfWatchedHistory.remove(id);
 
   if (state.activeViewerClipId === id) {
     showViewerExpired(
@@ -1468,6 +1654,7 @@ function bindEvents() {
         R2Service.deleteClip(clip.id, { passcode: state.passcode })
       )
     );
+    SelfWatchedHistory.removeMany(toDelete.map((c) => c.id));
     state.clips = [];
     renderClipList();
     refreshStorageUsage();
