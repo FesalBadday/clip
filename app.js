@@ -4,9 +4,10 @@
    2. API_BASE_URL: Your deployed Cloudflare Worker URL (no trailing slash).
    ========================================================================== */
 const EXPIRATION_MINUTES = 1;
-const API_BASE_URL = "https://clipvault-api.faisal-n04.workers.dev/";
+const API_BASE_URL = "https://clipvault-api.faisal-n04.workers.dev";
 
 const LOCAL_LIST_KEY = "clipvault_my_clips_v1";
+const PASSCODE_STORAGE_KEY = "clipvault_upload_passcode";
 
 /* ==========================================================================
    STATE & DOM REFERENCES
@@ -14,6 +15,7 @@ const LOCAL_LIST_KEY = "clipvault_my_clips_v1";
 const state = {
   clips: [],
   activeViewerClipId: null,
+  passcodeVerified: false,
   tickerId: null
 };
 
@@ -56,6 +58,69 @@ const dom = {
 };
 
 /* ==========================================================================
+   PASSCODE AUTHENTICATION (UPLOADER ONLY)
+   Stored locally in your browser so you only type it once per device.
+   Recipients opening #clip=... links never need a passcode.
+   ========================================================================== */
+function getStoredPasscode() {
+  try {
+    return localStorage.getItem(PASSCODE_STORAGE_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function saveStoredPasscode(code) {
+  try {
+    localStorage.setItem(PASSCODE_STORAGE_KEY, code);
+  } catch {
+    // Ignore storage restrictions
+  }
+}
+
+function clearStoredPasscode() {
+  state.passcodeVerified = false;
+  try {
+    localStorage.removeItem(PASSCODE_STORAGE_KEY);
+  } catch {
+    // Ignore storage restrictions
+  }
+}
+
+async function ensureUploadPasscode() {
+  let passcode = getStoredPasscode();
+
+  if (!passcode) {
+    const entered = window.prompt("Enter your upload passcode:");
+    passcode = (entered || "").trim();
+    if (!passcode) {
+      showToast("Upload cancelled — passcode required.", "error");
+      return null;
+    }
+  }
+
+  // Verify once per session so batch uploads fail fast on a wrong passcode
+  if (!state.passcodeVerified) {
+    try {
+      const ok = await R2Service.verifyPasscode(passcode);
+      if (!ok) {
+        clearStoredPasscode();
+        showToast("Invalid upload passcode. Try again.", "error");
+        return null;
+      }
+      saveStoredPasscode(passcode);
+      state.passcodeVerified = true;
+    } catch (err) {
+      console.error("Passcode verification failed:", err);
+      showToast(err.message || "Could not verify passcode with server.", "error");
+      return null;
+    }
+  }
+
+  return passcode;
+}
+
+/* ==========================================================================
    CLOUDFLARE R2 API SERVICE
    ========================================================================== */
 function getApiBase() {
@@ -63,14 +128,30 @@ function getApiBase() {
 }
 
 function isApiConfigured() {
-  return !API_BASE_URL.includes("YOUR-WORKER-NAME");
+  return Boolean(API_BASE_URL) && !API_BASE_URL.includes("YOUR-WORKER-NAME");
 }
 
 const R2Service = {
-  async initUpload({ name, type, mediaKind, size }) {
+  async verifyPasscode(passcode) {
+    const res = await fetch(`${getApiBase()}/api/auth/verify`, {
+      method: "POST",
+      headers: {
+        "X-Upload-Passcode": passcode
+      }
+    });
+    if (res.status === 401) return false;
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `Auth check failed (${res.status})`);
+    return Boolean(data.ok);
+  },
+
+  async initUpload({ name, type, mediaKind, size }, passcode) {
     const res = await fetch(`${getApiBase()}/api/clips/init`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "X-Upload-Passcode": passcode
+      },
       body: JSON.stringify({
         name,
         type,
@@ -79,7 +160,12 @@ const R2Service = {
         expirationMinutes: EXPIRATION_MINUTES
       })
     });
+
     const data = await res.json().catch(() => ({}));
+    if (res.status === 401) {
+      clearStoredPasscode();
+      throw new Error("Invalid upload passcode. Try uploading again to re-enter it.");
+    }
     if (!res.ok) throw new Error(data.error || `Init failed (${res.status})`);
     return data; // { clip, uploadUrl }
   },
@@ -280,10 +366,13 @@ async function handleFilesSelected(fileList) {
     return;
   }
 
+  const passcode = await ensureUploadPasscode();
+  if (!passcode) return;
+
   dom.uploadQueueSection.classList.remove("hidden");
   updateQueueCounter();
 
-  const tasks = files.map((file) => processSingleUpload(file));
+  const tasks = files.map((file) => processSingleUpload(file, passcode));
   await Promise.allSettled(tasks);
 
   setTimeout(() => {
@@ -347,7 +436,7 @@ function updateQueueCounter() {
   dom.queueCount.textContent = String(dom.uploadQueueList.children.length);
 }
 
-async function processSingleUpload(file) {
+async function processSingleUpload(file, passcode) {
   const ui = createUploadQueueRow(file.name);
   const mediaKind = detectMediaKind(file);
 
@@ -364,12 +453,15 @@ async function processSingleUpload(file) {
     ui.setProgress(3, "Preparing...");
 
     // 1. Request presigned PUT URL from Worker
-    const { clip, uploadUrl } = await R2Service.initUpload({
-      name: file.name,
-      type: contentType,
-      mediaKind,
-      size: file.size
-    });
+    const { clip, uploadUrl } = await R2Service.initUpload(
+      {
+        name: file.name,
+        type: contentType,
+        mediaKind,
+        size: file.size
+      },
+      passcode
+    );
 
     // 2. Upload file directly to Cloudflare R2 with real progress
     await R2Service.uploadDirectToR2(uploadUrl, file, contentType, (pct) => {
