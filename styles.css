@@ -127,7 +127,7 @@ body {
 
 /* Hero */
 .hero {
-  padding: 32px 0 24px;
+  padding: 32px 0 22px;
 }
 
 .hero h1 {
@@ -145,6 +145,152 @@ body {
   max-width: 60ch;
 }
 
+/* Passcode Lock Bar */
+.auth-bar {
+  margin-bottom: 16px;
+  padding: 14px 18px;
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  box-shadow: var(--shadow-card);
+  transition: border-color var(--transition), background var(--transition);
+}
+
+.auth-bar.is-unlocked {
+  border-color: rgba(34, 197, 94, 0.25);
+  background: linear-gradient(90deg, rgba(34, 197, 94, 0.06), var(--bg-surface) 45%);
+}
+
+.auth-bar.is-attention {
+  border-color: var(--accent);
+}
+
+.auth-locked {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.auth-unlocked {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.auth-status-group {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.auth-icon {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+}
+
+.auth-icon.is-locked {
+  background: var(--warning-soft);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.25);
+}
+
+.auth-icon.is-unlocked {
+  background: var(--success-soft);
+  color: #4ade80;
+  border: 1px solid rgba(34, 197, 94, 0.28);
+}
+
+.auth-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.auth-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.25;
+}
+
+.auth-subtitle {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.auth-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 1 320px;
+}
+
+.auth-input {
+  flex: 1;
+  min-width: 0;
+  height: 38px;
+  padding: 0 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 0.875rem;
+  outline: none;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+
+.auth-input::placeholder {
+  color: var(--text-muted);
+}
+
+.auth-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(109, 106, 255, 0.18);
+}
+
+.auth-error {
+  flex: 1 0 100%;
+  margin: -4px 0 0;
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: #f87171;
+}
+
+.is-shaking {
+  animation: auth-shake 320ms ease;
+}
+
+@keyframes auth-shake {
+  0%, 100% {
+    transform: translateX(0);
+  }
+
+  20% {
+    transform: translateX(-5px);
+  }
+
+  45% {
+    transform: translateX(5px);
+  }
+
+  70% {
+    transform: translateX(-3px);
+  }
+
+  85% {
+    transform: translateX(3px);
+  }
+}
+
 /* Drop Zone */
 .drop-zone {
   position: relative;
@@ -158,11 +304,23 @@ body {
   background: var(--bg-surface);
   border: 1.5px dashed var(--border-strong);
   cursor: pointer;
-  transition: border-color var(--transition), background var(--transition), transform var(--transition);
+  transition: border-color var(--transition), background var(--transition), transform var(--transition), opacity var(--transition);
 }
 
-.drop-zone:hover,
-.drop-zone:focus-visible {
+.drop-zone.is-locked {
+  opacity: 0.58;
+  border-color: var(--border-subtle);
+  cursor: not-allowed;
+}
+
+.drop-zone.is-locked:hover,
+.drop-zone.is-locked:focus-visible {
+  border-color: var(--border-strong);
+  background: var(--bg-surface);
+}
+
+.drop-zone:not(.is-locked):hover,
+.drop-zone:not(.is-locked):focus-visible {
   outline: none;
   border-color: var(--accent);
   background: rgba(109, 106, 255, 0.06);
@@ -183,6 +341,11 @@ body {
   border-radius: 16px;
   background: var(--accent-soft);
   color: var(--accent-hover);
+}
+
+.drop-zone.is-locked .drop-zone-icon {
+  background: var(--bg-elevated);
+  color: var(--text-muted);
 }
 
 .drop-zone-title {
@@ -521,10 +684,15 @@ body {
   cursor: pointer;
   white-space: nowrap;
   text-decoration: none;
-  transition: background var(--transition), border-color var(--transition), color var(--transition), transform 120ms ease;
+  transition: background var(--transition), border-color var(--transition), color var(--transition), transform 120ms ease, opacity var(--transition);
 }
 
-.btn:active {
+.btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn:not(:disabled):active {
   transform: translateY(1px);
 }
 
@@ -539,7 +707,7 @@ body {
   color: #ffffff;
 }
 
-.btn-primary:hover {
+.btn-primary:not(:disabled):hover {
   background: var(--accent-hover);
 }
 
@@ -793,6 +961,20 @@ body {
 @media (max-width: 640px) {
   .app-shell {
     padding: 14px 14px 56px;
+  }
+
+  .auth-bar {
+    padding: 14px;
+  }
+
+  .auth-locked {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .auth-form {
+    flex: 1 1 auto;
+    width: 100%;
   }
 
   .drop-zone {

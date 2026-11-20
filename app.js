@@ -3,7 +3,7 @@
    1. EXPIRATION_MINUTES: Default clip lifetime in minutes (180 = 3 hours).
    2. API_BASE_URL: Your deployed Cloudflare Worker URL (no trailing slash).
    ========================================================================== */
-const EXPIRATION_MINUTES = 1;
+const EXPIRATION_MINUTES = 180;
 const API_BASE_URL = "https://clipvault-api.faisal-n04.workers.dev";
 
 const LOCAL_LIST_KEY = "clipvault_my_clips_v1";
@@ -15,7 +15,8 @@ const PASSCODE_STORAGE_KEY = "clipvault_upload_passcode";
 const state = {
   clips: [],
   activeViewerClipId: null,
-  passcodeVerified: false,
+  isUnlocked: false,
+  passcode: "",
   tickerId: null
 };
 
@@ -24,6 +25,16 @@ const dom = {
   retentionLabel: document.getElementById("retentionLabel"),
 
   uploaderView: document.getElementById("uploaderView"),
+
+  authBar: document.getElementById("authBar"),
+  authLockedState: document.getElementById("authLockedState"),
+  authUnlockedState: document.getElementById("authUnlockedState"),
+  passcodeForm: document.getElementById("passcodeForm"),
+  passcodeInput: document.getElementById("passcodeInput"),
+  unlockBtn: document.getElementById("unlockBtn"),
+  authError: document.getElementById("authError"),
+  lockBtn: document.getElementById("lockBtn"),
+
   dropZone: document.getElementById("dropZone"),
   fileInput: document.getElementById("fileInput"),
 
@@ -58,8 +69,8 @@ const dom = {
 };
 
 /* ==========================================================================
-   PASSCODE AUTHENTICATION (UPLOADER ONLY)
-   Stored locally in your browser so you only type it once per device.
+   PASSCODE LOCK BAR & AUTHENTICATION (UPLOADER ONLY)
+   Verified against POST /api/auth/verify and remembered in localStorage.
    Recipients opening #clip=... links never need a passcode.
    ========================================================================== */
 function getStoredPasscode() {
@@ -79,7 +90,6 @@ function saveStoredPasscode(code) {
 }
 
 function clearStoredPasscode() {
-  state.passcodeVerified = false;
   try {
     localStorage.removeItem(PASSCODE_STORAGE_KEY);
   } catch {
@@ -87,37 +97,88 @@ function clearStoredPasscode() {
   }
 }
 
-async function ensureUploadPasscode() {
-  let passcode = getStoredPasscode();
+function showAuthError(message) {
+  dom.authError.textContent = message;
+  dom.authError.classList.remove("hidden");
+  dom.authBar.classList.remove("is-shaking");
+  void dom.authBar.offsetWidth; // Restart animation
+  dom.authBar.classList.add("is-shaking");
+}
 
-  if (!passcode) {
-    const entered = window.prompt("Enter your upload passcode:");
-    passcode = (entered || "").trim();
-    if (!passcode) {
-      showToast("Upload cancelled — passcode required.", "error");
-      return null;
-    }
+function clearAuthError() {
+  dom.authError.textContent = "";
+  dom.authError.classList.add("hidden");
+}
+
+function setUploaderUnlocked(unlocked, passcode = "") {
+  state.isUnlocked = unlocked;
+  state.passcode = unlocked ? passcode : "";
+
+  dom.authBar.classList.toggle("is-unlocked", unlocked);
+  dom.authLockedState.classList.toggle("hidden", unlocked);
+  dom.authUnlockedState.classList.toggle("hidden", !unlocked);
+
+  dom.dropZone.classList.toggle("is-locked", !unlocked);
+  dom.dropZone.setAttribute("aria-disabled", String(!unlocked));
+
+  if (unlocked) {
+    clearAuthError();
+    dom.passcodeInput.value = "";
+  }
+}
+
+function promptUnlockFocus(notice) {
+  dom.authBar.classList.add("is-attention");
+  setTimeout(() => dom.authBar.classList.remove("is-attention"), 900);
+  if (notice) showAuthError(notice);
+  dom.passcodeInput.focus();
+}
+
+function lockUploader(toastMessage = "Uploader locked.") {
+  clearStoredPasscode();
+  setUploaderUnlocked(false);
+  if (toastMessage) showToast(toastMessage);
+}
+
+async function verifyAndUnlock(code, { silent = false } = {}) {
+  const trimmed = (code || "").trim();
+  if (!trimmed) {
+    if (!silent) showAuthError("Please enter your upload passcode.");
+    return false;
   }
 
-  // Verify once per session so batch uploads fail fast on a wrong passcode
-  if (!state.passcodeVerified) {
-    try {
-      const ok = await R2Service.verifyPasscode(passcode);
-      if (!ok) {
-        clearStoredPasscode();
-        showToast("Invalid upload passcode. Try again.", "error");
-        return null;
+  dom.unlockBtn.disabled = true;
+  dom.unlockBtn.textContent = "Verifying...";
+  clearAuthError();
+
+  try {
+    const ok = await R2Service.verifyPasscode(trimmed);
+    if (!ok) {
+      clearStoredPasscode();
+      setUploaderUnlocked(false);
+      if (!silent) {
+        showAuthError("Incorrect passcode. Try again.");
+        dom.passcodeInput.focus();
+        dom.passcodeInput.select();
       }
-      saveStoredPasscode(passcode);
-      state.passcodeVerified = true;
-    } catch (err) {
-      console.error("Passcode verification failed:", err);
-      showToast(err.message || "Could not verify passcode with server.", "error");
-      return null;
+      return false;
     }
-  }
 
-  return passcode;
+    saveStoredPasscode(trimmed);
+    setUploaderUnlocked(true, trimmed);
+    if (!silent) showToast("Uploader unlocked.", "success");
+    return true;
+  } catch (err) {
+    console.error("Passcode verification failed:", err);
+    setUploaderUnlocked(false);
+    if (!silent) {
+      showAuthError(err.message || "Could not reach server to verify passcode.");
+    }
+    return false;
+  } finally {
+    dom.unlockBtn.disabled = false;
+    dom.unlockBtn.textContent = "Unlock";
+  }
 }
 
 /* ==========================================================================
@@ -163,8 +224,9 @@ const R2Service = {
 
     const data = await res.json().catch(() => ({}));
     if (res.status === 401) {
-      clearStoredPasscode();
-      throw new Error("Invalid upload passcode. Try uploading again to re-enter it.");
+      lockUploader("");
+      promptUnlockFocus("Passcode rejected. Please unlock again.");
+      throw new Error("Upload passcode rejected.");
     }
     if (!res.ok) throw new Error(data.error || `Init failed (${res.status})`);
     return data; // { clip, uploadUrl }
@@ -366,13 +428,16 @@ async function handleFilesSelected(fileList) {
     return;
   }
 
-  const passcode = await ensureUploadPasscode();
-  if (!passcode) return;
+  if (!state.isUnlocked || !state.passcode) {
+    promptUnlockFocus("Enter your upload passcode above before uploading clips.");
+    return;
+  }
 
   dom.uploadQueueSection.classList.remove("hidden");
   updateQueueCounter();
 
-  const tasks = files.map((file) => processSingleUpload(file, passcode));
+  const activePasscode = state.passcode;
+  const tasks = files.map((file) => processSingleUpload(file, activePasscode));
   await Promise.allSettled(tasks);
 
   setTimeout(() => {
@@ -663,7 +728,6 @@ async function handleRouteChange() {
 
   try {
     const result = await R2Service.fetchClipForViewer(clipId);
-    // Abort if user navigated away during fetch
     if (state.activeViewerClipId !== clipId) return;
 
     if (!result || Date.now() >= result.clip.expiresAt) {
@@ -816,12 +880,35 @@ function startCountdownTicker() {
    EVENT LISTENERS & INITIALIZATION
    ========================================================================== */
 function bindEvents() {
-  dom.dropZone.addEventListener("click", () => dom.fileInput.click());
+  // Passcode Lock Bar events
+  dom.passcodeForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    await verifyAndUnlock(dom.passcodeInput.value);
+  });
+
+  dom.passcodeInput.addEventListener("input", () => {
+    if (!dom.authError.classList.contains("hidden")) clearAuthError();
+  });
+
+  dom.lockBtn.addEventListener("click", () => {
+    lockUploader("Uploader locked.");
+  });
+
+  // Drop Zone events
+  const openFilePickerIfUnlocked = () => {
+    if (!state.isUnlocked) {
+      promptUnlockFocus("Enter your upload passcode to unlock uploads.");
+      return;
+    }
+    dom.fileInput.click();
+  };
+
+  dom.dropZone.addEventListener("click", openFilePickerIfUnlocked);
 
   dom.dropZone.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
-      dom.fileInput.click();
+      openFilePickerIfUnlocked();
     }
   });
 
@@ -834,7 +921,9 @@ function bindEvents() {
     dom.dropZone.addEventListener(evtName, (e) => {
       e.preventDefault();
       e.stopPropagation();
-      dom.dropZone.classList.add("drag-active");
+      if (state.isUnlocked) {
+        dom.dropZone.classList.add("drag-active");
+      }
     });
   });
 
@@ -847,9 +936,14 @@ function bindEvents() {
   });
 
   dom.dropZone.addEventListener("drop", (e) => {
+    if (!state.isUnlocked) {
+      promptUnlockFocus("Unlock the uploader above before dropping files.");
+      return;
+    }
     handleFilesSelected(e.dataTransfer?.files);
   });
 
+  // Batch Actions
   dom.copyAllBtn.addEventListener("click", async () => {
     const allLinks = state.clips
       .map((clip) => `${clip.name}: ${buildShareUrl(clip.id)}`)
@@ -874,6 +968,7 @@ function bindEvents() {
     showToast("All clips permanently deleted.", "success");
   });
 
+  // Viewer Navigation & Copy
   const goHome = (e) => {
     if (e) e.preventDefault();
     window.location.hash = "";
@@ -899,11 +994,19 @@ function bindEvents() {
 
 async function init() {
   dom.retentionLabel.textContent = formatRetentionHeader(EXPIRATION_MINUTES);
+  setUploaderUnlocked(false);
   bindEvents();
+
   state.clips = LocalHistory.load();
   renderClipList();
   await handleRouteChange();
   startCountdownTicker();
+
+  // Silently re-verify saved passcode on this browser so you stay unlocked
+  const savedCode = getStoredPasscode();
+  if (savedCode && isApiConfigured()) {
+    await verifyAndUnlock(savedCode, { silent: true });
+  }
 }
 
 document.addEventListener("DOMContentLoaded", init);
