@@ -1,5 +1,5 @@
 /* ==========================================================================
-   ClipVault — Dark Sleek UI Stylesheet
+   ClipVault — Dark YouTube-Style Media Grid Stylesheet
    ========================================================================== */
 
 :root {
@@ -30,7 +30,7 @@
 
   --radius-sm: 8px;
   --radius-md: 14px;
-  --radius-lg: 20px;
+  --radius-lg: 18px;
 
   --font-sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
@@ -64,12 +64,12 @@ body {
   display: none !important;
 }
 
-/* Layout Shell */
+/* Layout Shell (Wider for YouTube-style 3-column desktop grid) */
 .app-shell {
   width: 100%;
-  max-width: 920px;
+  max-width: 1140px;
   margin: 0 auto;
-  padding: 20px 20px 64px;
+  padding: 20px 24px 72px;
 }
 
 /* Header */
@@ -78,7 +78,7 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 8px 0 28px;
+  padding: 8px 0 24px;
   border-bottom: 1px solid var(--border-subtle);
 }
 
@@ -90,7 +90,7 @@ body {
   text-decoration: none;
   font-weight: 700;
   letter-spacing: -0.02em;
-  font-size: 1.125rem;
+  font-size: 1.15rem;
 }
 
 .brand-mark {
@@ -127,12 +127,12 @@ body {
 
 /* Hero */
 .hero {
-  padding: 32px 0 22px;
+  padding: 28px 0 20px;
 }
 
 .hero h1 {
   margin: 0 0 8px;
-  font-size: clamp(1.65rem, 4vw, 2.35rem);
+  font-size: clamp(1.65rem, 3.6vw, 2.25rem);
   font-weight: 700;
   letter-spacing: -0.03em;
   line-height: 1.15;
@@ -141,8 +141,8 @@ body {
 .hero-sub {
   margin: 0;
   color: var(--text-secondary);
-  font-size: 1rem;
-  max-width: 60ch;
+  font-size: 0.98rem;
+  max-width: 62ch;
 }
 
 /* Passcode Lock Bar */
@@ -430,7 +430,7 @@ body {
   align-items: center;
   justify-content: center;
   text-align: center;
-  padding: 44px 24px;
+  padding: 36px 24px;
   border-radius: var(--radius-lg);
   background: var(--bg-surface);
   border: 1.5px dashed var(--border-strong);
@@ -460,16 +460,16 @@ body {
 .drop-zone.drag-active {
   border-color: var(--accent-hover);
   background: rgba(109, 106, 255, 0.12);
-  transform: scale(1.008);
+  transform: scale(1.006);
 }
 
 .drop-zone-icon {
   display: grid;
   place-items: center;
-  width: 58px;
-  height: 58px;
-  margin-bottom: 16px;
-  border-radius: 16px;
+  width: 54px;
+  height: 54px;
+  margin-bottom: 14px;
+  border-radius: 15px;
   background: var(--accent-soft);
   color: var(--accent-hover);
 }
@@ -481,7 +481,7 @@ body {
 
 .drop-zone-title {
   margin: 0 0 6px;
-  font-size: 1.05rem;
+  font-size: 1.02rem;
   font-weight: 600;
   color: var(--text-primary);
 }
@@ -492,7 +492,7 @@ body {
 
 .drop-zone-hint {
   margin: 0;
-  font-size: 0.875rem;
+  font-size: 0.85rem;
   color: var(--text-muted);
 }
 
@@ -506,7 +506,7 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 14px;
+  margin-bottom: 16px;
   flex-wrap: wrap;
 }
 
@@ -518,7 +518,7 @@ body {
 
 .section-header h2 {
   margin: 0;
-  font-size: 1rem;
+  font-size: 1.05rem;
   font-weight: 600;
   letter-spacing: -0.01em;
   color: var(--text-primary);
@@ -548,7 +548,7 @@ body {
 
 /* Empty State */
 .empty-state {
-  padding: 36px 20px;
+  padding: 40px 20px;
   text-align: center;
   border-radius: var(--radius-md);
   background: rgba(17, 19, 27, 0.6);
@@ -561,131 +561,224 @@ body {
   margin: 0;
 }
 
-/* Clip List & Cards */
-.clip-list {
+/* Upload Queue stays vertical stack */
+#uploadQueueList {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
+}
+
+/* ==========================================================================
+   YOUTUBE-STYLE CLIP GRID & CARDS
+   ========================================================================== */
+#clipList {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+  gap: 20px;
 }
 
 .clip-card {
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 16px 18px;
   border-radius: var(--radius-md);
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
   box-shadow: var(--shadow-card);
-  transition: border-color var(--transition), opacity 240ms ease, transform 240ms ease;
+  overflow: hidden;
+  transition: border-color var(--transition), transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity 220ms ease, box-shadow 220ms ease;
 }
 
 .clip-card:hover {
   border-color: var(--border-strong);
+  transform: translateY(-3px);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.48);
 }
 
 .clip-card.removing {
   opacity: 0;
-  transform: translateY(-6px);
+  transform: scale(0.96);
 }
 
-.clip-top {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 14px;
+/* 16:9 Thumbnail Stage */
+.thumb-link {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #07080d;
+  overflow: hidden;
+  text-decoration: none;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
-.clip-info {
+.thumb-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  transition: transform 280ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.clip-card:hover .thumb-img {
+  transform: scale(1.04);
+}
+
+/* Sleek Fallback Cover (for Audio clips or legacy videos without a frame) */
+.thumb-placeholder {
+  width: 100%;
+  height: 100%;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 12px;
-  min-width: 0;
+  justify-content: center;
+  gap: 10px;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(109, 106, 255, 0.24), transparent 62%),
+    linear-gradient(145deg, #131624, #090b12);
+  color: var(--accent-hover);
+  transition: transform 280ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
-.clip-icon {
-  flex-shrink: 0;
+.thumb-placeholder.is-audio {
+  background:
+    radial-gradient(circle at 50% 42%, rgba(56, 189, 248, 0.22), transparent 64%),
+    linear-gradient(145deg, #0d1926, #080b12);
+  color: #38bdf8;
+}
+
+.clip-card:hover .thumb-placeholder {
+  transform: scale(1.03);
+}
+
+.audio-bars {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 5px;
+  height: 36px;
+}
+
+.audio-bars span {
+  width: 5px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #7dd3fc, #38bdf8);
+  opacity: 0.9;
+}
+
+.audio-bars span:nth-child(1) {
+  height: 14px;
+}
+
+.audio-bars span:nth-child(2) {
+  height: 28px;
+}
+
+.audio-bars span:nth-child(3) {
+  height: 36px;
+}
+
+.audio-bars span:nth-child(4) {
+  height: 22px;
+}
+
+.audio-bars span:nth-child(5) {
+  height: 30px;
+}
+
+.audio-bars span:nth-child(6) {
+  height: 16px;
+}
+
+.thumb-placeholder-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: rgba(244, 246, 251, 0.72);
+}
+
+/* Hover Play Overlay */
+.thumb-play-overlay {
+  position: absolute;
+  inset: 0;
   display: grid;
   place-items: center;
-  width: 42px;
-  height: 42px;
-  border-radius: 11px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
-  color: var(--accent-hover);
+  background: rgba(5, 6, 10, 0.28);
+  opacity: 0;
+  transition: opacity 200ms ease;
 }
 
-.clip-icon.is-audio {
-  color: #38bdf8;
+.thumb-link:hover .thumb-play-overlay,
+.thumb-link:focus-visible .thumb-play-overlay {
+  opacity: 1;
 }
 
-.clip-text {
-  min-width: 0;
+.thumb-play-circle {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: rgba(12, 14, 22, 0.84);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  color: #ffffff;
+  backdrop-filter: blur(8px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  transform: scale(0.92);
+  transition: transform 200ms ease, background 200ms ease;
 }
 
-.clip-name {
-  margin: 0;
-  font-size: 0.96rem;
-  font-weight: 600;
-  color: var(--text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.thumb-link:hover .thumb-play-circle {
+  transform: scale(1);
+  background: var(--accent);
+  border-color: transparent;
 }
 
-.clip-submeta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 3px;
-  font-size: 0.8rem;
-  color: var(--text-secondary);
-}
-
-.media-badge {
-  display: inline-block;
-  padding: 2px 7px;
-  border-radius: 6px;
-  background: var(--accent-soft);
-  color: var(--accent-hover);
-  font-size: 0.68rem;
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-}
-
-.media-badge.is-audio {
-  background: rgba(56, 189, 248, 0.14);
-  color: #38bdf8;
-}
-
-/* Countdown Badge */
-.countdown-chip {
-  flex-shrink: 0;
+/* Thumbnail Corner Badges (Countdown Top-Left, Duration Bottom-Right) */
+.thumb-countdown {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 2;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 10px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
+  gap: 5px;
+  padding: 4px 8px;
+  border-radius: 7px;
+  background: rgba(9, 10, 15, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  backdrop-filter: blur(8px);
   font-family: var(--font-mono);
-  font-size: 0.84rem;
+  font-size: 0.74rem;
   font-weight: 600;
-  color: var(--text-primary);
+  color: #f4f6fb;
 }
 
-.countdown-chip.is-warning {
-  background: var(--warning-soft);
-  border-color: rgba(245, 158, 11, 0.35);
-  color: #fbbf24;
+.thumb-countdown.is-warning {
+  background: rgba(120, 53, 15, 0.85);
+  border-color: rgba(245, 158, 11, 0.5);
+  color: #fde68a;
 }
 
-.countdown-chip.is-critical {
-  background: var(--danger-soft);
-  border-color: rgba(239, 68, 68, 0.4);
-  color: #f87171;
+.thumb-countdown.is-critical {
+  background: rgba(127, 29, 29, 0.88);
+  border-color: rgba(239, 68, 68, 0.6);
+  color: #fecaca;
   animation: pulse-urgent 1.2s ease-in-out infinite;
+}
+
+.thumb-duration {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  z-index: 2;
+  padding: 3px 7px;
+  border-radius: 5px;
+  background: rgba(9, 10, 15, 0.84);
+  font-family: var(--font-mono);
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #ffffff;
 }
 
 @keyframes pulse-urgent {
@@ -698,11 +791,70 @@ body {
   }
 }
 
-/* Share Row inside Clip Card */
-.clip-bottom {
+/* YouTube Card Body */
+.clip-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 15px 15px;
+  flex: 1;
+}
+
+.clip-title-link {
+  color: var(--text-primary);
+  text-decoration: none;
+  font-size: 0.96rem;
+  font-weight: 600;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+  transition: color var(--transition);
+}
+
+.clip-title-link:hover {
+  color: var(--accent-hover);
+}
+
+.clip-submeta {
   display: flex;
   align-items: center;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 7px;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+}
+
+.meta-sep {
+  color: var(--text-muted);
+}
+
+.media-badge {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: var(--accent-soft);
+  color: var(--accent-hover);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.media-badge.is-audio {
+  background: rgba(56, 189, 248, 0.14);
+  color: #38bdf8;
+}
+
+/* Share Input & Action Row inside YouTube Card */
+.clip-share-stack {
+  margin-top: auto;
+  padding-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .share-input-group {
@@ -714,16 +866,17 @@ body {
 }
 
 .share-url-input {
+  width: 100%;
   flex: 1;
   min-width: 0;
-  height: 38px;
-  padding: 0 12px;
+  height: 34px;
+  padding: 0 10px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-subtle);
   background: var(--bg-base);
   color: var(--text-secondary);
   font-family: var(--font-mono);
-  font-size: 0.8rem;
+  font-size: 0.76rem;
   outline: none;
   transition: border-color var(--transition), color var(--transition);
 }
@@ -737,6 +890,16 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.clip-actions .btn-primary {
+  flex: 1;
+  height: 36px;
+}
+
+.clip-actions .btn-icon {
+  width: 36px;
+  height: 36px;
   flex-shrink: 0;
 }
 
@@ -897,6 +1060,8 @@ body {
 }
 
 .viewer-card {
+  max-width: 960px;
+  margin: 0 auto;
   border-radius: var(--radius-lg);
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
@@ -975,7 +1140,7 @@ body {
 
 .viewer-stage video {
   width: 100%;
-  max-height: 70vh;
+  max-height: 72vh;
   border-radius: var(--radius-sm);
   background: #000;
   outline: none;
@@ -1012,6 +1177,11 @@ body {
 .viewer-footer {
   padding: 18px 22px;
   border-top: 1px solid var(--border-subtle);
+}
+
+.viewer-footer .share-url-input {
+  height: 38px;
+  font-size: 0.82rem;
 }
 
 /* Expired Card */
@@ -1120,33 +1290,12 @@ body {
   }
 
   .drop-zone {
-    padding: 34px 16px;
+    padding: 30px 16px;
   }
 
-  .clip-top {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
-  .countdown-chip {
-    align-self: flex-start;
-  }
-
-  .clip-bottom {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
-  .clip-actions {
-    width: 100%;
-  }
-
-  .clip-actions .btn {
-    flex: 1;
-  }
-
-  .clip-actions .btn-icon {
-    flex: 0 0 38px;
+  #clipList {
+    grid-template-columns: 1fr;
+    gap: 16px;
   }
 
   .viewer-header {

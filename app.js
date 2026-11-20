@@ -7,6 +7,8 @@ const EXPIRATION_MINUTES = 180;
 const API_BASE_URL = "https://clipvault-api.faisal-n04.workers.dev";
 
 const GB = 1000 * 1000 * 1000; // Decimal GB to match Cloudflare R2 billing
+const THUMB_WIDTH = 480;
+const THUMB_HEIGHT = 270;
 const LEGACY_LOCAL_LIST_KEY = "clipvault_my_clips_v1";
 const PASSCODE_STORAGE_KEY = "clipvault_upload_passcode";
 
@@ -135,7 +137,6 @@ function setUploaderUnlocked(unlocked, passcode = "") {
     clearAuthError();
     dom.passcodeInput.value = "";
   } else {
-    // Immediately clear clips from memory & UI when locked
     state.clips = [];
     state.loadingClips = false;
     renderClipList();
@@ -195,6 +196,165 @@ async function verifyAndUnlock(code, { silent = false } = {}) {
     dom.unlockBtn.disabled = false;
     dom.unlockBtn.textContent = "Unlock";
   }
+}
+
+/* ==========================================================================
+   AUTOMATIC VIDEO THUMBNAIL & DURATION EXTRACTION
+   Captures a 16:9 JPEG frame (~15–30 KB) from the video before uploading.
+   Gracefully falls back if a browser cannot decode the video codec locally.
+   ========================================================================== */
+function extractMediaMetadata(file, mediaKind) {
+  if (mediaKind === "audio") {
+    return extractAudioDuration(file);
+  }
+  return extractVideoThumbnailAndDuration(file);
+}
+
+function extractAudioDuration(file) {
+  return new Promise((resolve) => {
+    const audio = document.createElement("audio");
+    const objectUrl = URL.createObjectURL(file);
+    let settled = false;
+
+    const finish = (duration) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      audio.removeAttribute("src");
+      audio.load();
+      URL.revokeObjectURL(objectUrl);
+      resolve({
+        duration: Number.isFinite(duration) && duration > 0 ? Math.round(duration) : null,
+        thumbnail: null
+      });
+    };
+
+    const timeoutId = setTimeout(() => finish(null), 3500);
+
+    audio.preload = "metadata";
+    audio.onloadedmetadata = () => finish(audio.duration);
+    audio.onerror = () => finish(null);
+    audio.src = objectUrl;
+  });
+}
+
+function extractVideoThumbnailAndDuration(file) {
+  return new Promise((resolve) => {
+    const video = document.createElement("video");
+    const objectUrl = URL.createObjectURL(file);
+    let settled = false;
+
+    const cleanup = () => {
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+      URL.revokeObjectURL(objectUrl);
+    };
+
+    const captureFrame = () => {
+      if (!video.videoWidth || !video.videoHeight) return null;
+
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = THUMB_WIDTH;
+        canvas.height = THUMB_HEIGHT;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return null;
+
+        const vw = video.videoWidth;
+        const vh = video.videoHeight;
+        const videoRatio = vw / vh;
+        const canvasRatio = THUMB_WIDTH / THUMB_HEIGHT;
+
+        ctx.fillStyle = "#07080d";
+        ctx.fillRect(0, 0, THUMB_WIDTH, THUMB_HEIGHT);
+
+        if (videoRatio < 1.25) {
+          // Portrait or square clip: dimmed ambient backdrop + crisp centered video
+          const coverScale = Math.max(THUMB_WIDTH / vw, THUMB_HEIGHT / vh);
+          const cw = vw * coverScale;
+          const ch = vh * coverScale;
+          ctx.save();
+          ctx.filter = "blur(14px) brightness(0.42)";
+          ctx.drawImage(video, (THUMB_WIDTH - cw) / 2, (THUMB_HEIGHT - ch) / 2, cw, ch);
+          ctx.restore();
+          ctx.fillStyle = "rgba(7, 8, 13, 0.35)";
+          ctx.fillRect(0, 0, THUMB_WIDTH, THUMB_HEIGHT);
+
+          const fitScale = Math.min(THUMB_WIDTH / vw, THUMB_HEIGHT / vh);
+          const fw = vw * fitScale;
+          const fh = vh * fitScale;
+          ctx.drawImage(video, (THUMB_WIDTH - fw) / 2, (THUMB_HEIGHT - fh) / 2, fw, fh);
+        } else {
+          // Landscape clip: full 16:9 cover crop like YouTube
+          const scale = Math.max(THUMB_WIDTH / vw, THUMB_HEIGHT / vh);
+          const dw = vw * scale;
+          const dh = vh * scale;
+          ctx.drawImage(video, (THUMB_WIDTH - dw) / 2, (THUMB_HEIGHT - dh) / 2, dw, dh);
+        }
+
+        let dataUrl = canvas.toDataURL("image/jpeg", 0.72);
+        if (dataUrl.length > 105000) {
+          dataUrl = canvas.toDataURL("image/jpeg", 0.55);
+        }
+        return dataUrl.length <= 115000 ? dataUrl : null;
+      } catch {
+        return null;
+      }
+    };
+
+    const finish = (thumbnail) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      const duration =
+        Number.isFinite(video.duration) && video.duration > 0
+          ? Math.round(video.duration)
+          : null;
+      cleanup();
+      resolve({ duration, thumbnail });
+    };
+
+    // Never stall upload if a codec fails to decode in browser
+    const timeoutId = setTimeout(() => {
+      const fallbackFrame = video.readyState >= 2 ? captureFrame() : null;
+      finish(fallbackFrame);
+    }, 4500);
+
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = "auto";
+
+    video.onloadedmetadata = () => {
+      const dur = video.duration;
+      // Pick a frame ~20% in (capped at 3s) to avoid black intro fade-ins
+      const targetTime =
+        Number.isFinite(dur) && dur > 0.5 ? Math.min(dur * 0.2, 3) : 0;
+
+      if (targetTime > 0) {
+        try {
+          video.currentTime = targetTime;
+        } catch {
+          // Fall through to onloadeddata
+        }
+      }
+    };
+
+    video.onseeked = () => {
+      finish(captureFrame());
+    };
+
+    video.onloadeddata = () => {
+      // If clip is too short to seek past 0s, capture the first decoded frame
+      const dur = video.duration;
+      if (!Number.isFinite(dur) || dur <= 0.5) {
+        finish(captureFrame());
+      }
+    };
+
+    video.onerror = () => finish(null);
+    video.src = objectUrl;
+  });
 }
 
 /* ==========================================================================
@@ -347,7 +507,7 @@ const R2Service = {
     return Array.isArray(data.clips) ? data.clips : [];
   },
 
-  async initUpload({ name, type, mediaKind, size }, passcode) {
+  async initUpload({ name, type, mediaKind, size, duration, thumbnail }, passcode) {
     const res = await fetch(`${getApiBase()}/api/clips/init`, {
       method: "POST",
       headers: {
@@ -359,6 +519,8 @@ const R2Service = {
         type,
         mediaKind,
         size,
+        duration,
+        thumbnail,
         expirationMinutes: EXPIRATION_MINUTES
       })
     });
@@ -462,6 +624,16 @@ function formatBytes(bytes) {
   return `${value.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
+function formatDuration(totalSeconds) {
+  if (!Number.isFinite(totalSeconds) || totalSeconds <= 0) return "";
+  const secs = Math.floor(totalSeconds);
+  const hrs = Math.floor(secs / 3600);
+  const mins = Math.floor((secs % 3600) / 60);
+  const rem = secs % 60;
+  const pad = (n) => String(n).padStart(2, "0");
+  return hrs > 0 ? `${hrs}:${pad(mins)}:${pad(rem)}` : `${mins}:${pad(rem)}`;
+}
+
 function formatCountdown(msRemaining) {
   const totalSeconds = Math.max(0, Math.floor(msRemaining / 1000));
   const hours = Math.floor(totalSeconds / 3600);
@@ -536,7 +708,7 @@ function flashCopiedButton(button, originalLabel = "Copy Link") {
 }
 
 /* ==========================================================================
-   SINGLE & BATCH UPLOAD FLOW (SERIALIZED RESERVATION + PARALLEL R2 PUTS)
+   SINGLE & BATCH UPLOAD FLOW (THUMBNAIL + SERIALIZED RESERVATION + R2 PUT)
    ========================================================================== */
 let reservationChain = Promise.resolve();
 
@@ -572,7 +744,6 @@ async function handleFilesSelected(fileList) {
   const uploadTasks = [];
   let authFailed = false;
 
-  // Reserve quota sequentially via /api/clips/init so batches cannot race past 9 GB
   for (const { file, ui } of entries) {
     if (authFailed) {
       ui.setError("Locked");
@@ -591,22 +762,29 @@ async function handleFilesSelected(fileList) {
     const contentType = file.type || (mediaKind === "video" ? "video/mp4" : "audio/mpeg");
 
     try {
-      ui.setProgress(3, "Reserving...");
+      // 1. Auto-extract video thumbnail & duration locally before reserving
+      ui.setProgress(2, mediaKind === "video" ? "Creating thumbnail..." : "Reading audio...");
+      const { duration, thumbnail } = await extractMediaMetadata(file, mediaKind);
+
+      // 2. Reserve quota sequentially via /api/clips/init so batches cannot race past 9 GB
+      ui.setProgress(4, "Reserving...");
       const reservation = await enqueueReservation(() =>
         R2Service.initUpload(
           {
             name: file.name,
             type: contentType,
             mediaKind,
-            size: file.size
+            size: file.size,
+            duration,
+            thumbnail
           },
           activePasscode
         )
       );
 
-      // Update storage bar immediately to reflect in-flight reserved bytes
       refreshStorageUsage();
 
+      // 3. Upload file directly to R2 in parallel
       uploadTasks.push(
         uploadReservedFile({
           file,
@@ -666,7 +844,6 @@ async function uploadReservedFile({ file, contentType, clip, uploadUrl, passcode
     ui.setError("Upload failed");
     showToast(err.message || `Failed to upload "${file.name}".`, "error");
 
-    // Release pending R2 reservation immediately and refresh storage bar
     await R2Service.deleteClip(clip.id, {
       passcode,
       deleteToken: clip.deleteToken
@@ -730,7 +907,7 @@ function updateQueueCounter() {
 }
 
 /* ==========================================================================
-   CLIP LIST RENDERING
+   YOUTUBE-STYLE CLIP GRID RENDERING
    ========================================================================== */
 function setEmptyStateMessage(message) {
   const p = dom.emptyState.querySelector("p");
@@ -781,66 +958,117 @@ function renderClipList() {
 
 function createClipCard(clip) {
   const shareUrl = buildShareUrl(clip.id);
+  const clipHash = `#clip=${encodeURIComponent(clip.id)}`;
   const remaining = clip.expiresAt - Date.now();
   const isAudio = clip.mediaKind === "audio";
+  const durationLabel = formatDuration(clip.duration);
 
   const card = document.createElement("article");
   card.className = "clip-card";
   card.dataset.clipId = clip.id;
 
-  const top = document.createElement("div");
-  top.className = "clip-top";
+  // 1. Clickable 16:9 Thumbnail Area (YouTube Style)
+  const thumbLink = document.createElement("a");
+  thumbLink.className = "thumb-link";
+  thumbLink.href = clipHash;
+  thumbLink.setAttribute("aria-label", `Play ${clip.name}`);
 
-  const info = document.createElement("div");
-  info.className = "clip-info";
+  if (!isAudio && clip.thumbnail) {
+    const img = document.createElement("img");
+    img.className = "thumb-img";
+    img.src = clip.thumbnail;
+    img.alt = `Thumbnail for ${clip.name}`;
+    img.loading = "lazy";
+    thumbLink.appendChild(img);
+  } else {
+    const placeholder = document.createElement("div");
+    placeholder.className = `thumb-placeholder ${isAudio ? "is-audio" : ""}`.trim();
+    placeholder.innerHTML = isAudio
+      ? `
+        <div class="audio-bars" aria-hidden="true">
+          <span></span><span></span><span></span><span></span><span></span><span></span>
+        </div>
+        <span class="thumb-placeholder-label">Audio Clip</span>
+      `
+      : `
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="2" y="4" width="20" height="16" rx="2.5"></rect>
+          <polygon points="10 9 15 12 10 15 10 9"></polygon>
+        </svg>
+        <span class="thumb-placeholder-label">Video Clip</span>
+      `;
+    thumbLink.appendChild(placeholder);
+  }
 
-  const icon = document.createElement("div");
-  icon.className = `clip-icon ${isAudio ? "is-audio" : ""}`;
-  icon.innerHTML = isAudio
-    ? `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg>`
-    : `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"></rect><polygon points="10 9 15 12 10 15 10 9"></polygon></svg>`;
+  // Hover Play Overlay
+  const playOverlay = document.createElement("div");
+  playOverlay.className = "thumb-play-overlay";
+  playOverlay.setAttribute("aria-hidden", "true");
+  playOverlay.innerHTML = `
+    <span class="thumb-play-circle">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+        <polygon points="6 4 20 12 6 20 6 4"></polygon>
+      </svg>
+    </span>
+  `;
+  thumbLink.appendChild(playOverlay);
 
-  const textWrap = document.createElement("div");
-  textWrap.className = "clip-text";
-
-  const name = document.createElement("h3");
-  name.className = "clip-name";
-  name.textContent = clip.name;
-  name.title = clip.name;
-
-  const submeta = document.createElement("div");
-  submeta.className = "clip-submeta";
-
-  const badge = document.createElement("span");
-  badge.className = `media-badge ${isAudio ? "is-audio" : ""}`;
-  badge.textContent = isAudio ? "Audio" : "Video";
-
-  const sizeEl = document.createElement("span");
-  sizeEl.textContent = formatBytes(clip.size);
-
-  submeta.append(badge, sizeEl);
-  textWrap.append(name, submeta);
-  info.append(icon, textWrap);
-
-  const countdownChip = document.createElement("div");
-  countdownChip.className = `countdown-chip ${getUrgencyClass(remaining)}`.trim();
-  countdownChip.dataset.countdownFor = clip.id;
-  countdownChip.title = "Time remaining before automatic deletion";
-  countdownChip.innerHTML = `
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+  // Live Countdown Pill (Top-Left of Thumbnail)
+  const countdownPill = document.createElement("div");
+  countdownPill.className = `thumb-countdown ${getUrgencyClass(remaining)}`.trim();
+  countdownPill.dataset.countdownFor = clip.id;
+  countdownPill.title = "Time remaining before automatic deletion";
+  countdownPill.innerHTML = `
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <circle cx="12" cy="12" r="10"></circle>
       <polyline points="12 6 12 12 16 14"></polyline>
     </svg>
     <span class="countdown-text">${formatCountdown(remaining)}</span>
   `;
+  thumbLink.appendChild(countdownPill);
 
-  top.append(info, countdownChip);
+  // Video / Audio Duration Pill (Bottom-Right of Thumbnail, YouTube Style)
+  if (durationLabel) {
+    const durBadge = document.createElement("span");
+    durBadge.className = "thumb-duration";
+    durBadge.textContent = durationLabel;
+    thumbLink.appendChild(durBadge);
+  }
 
-  const bottom = document.createElement("div");
-  bottom.className = "clip-bottom";
+  // 2. Card Details & Share Controls
+  const body = document.createElement("div");
+  body.className = "clip-body";
 
-  const inputGroup = document.createElement("div");
-  inputGroup.className = "share-input-group";
+  const titleLink = document.createElement("a");
+  titleLink.className = "clip-title-link";
+  titleLink.href = clipHash;
+  titleLink.textContent = clip.name;
+  titleLink.title = clip.name;
+
+  const submeta = document.createElement("div");
+  submeta.className = "clip-submeta";
+
+  const badge = document.createElement("span");
+  badge.className = `media-badge ${isAudio ? "is-audio" : ""}`.trim();
+  badge.textContent = isAudio ? "Audio" : "Video";
+
+  const sizeEl = document.createElement("span");
+  sizeEl.textContent = formatBytes(clip.size);
+
+  const sep = document.createElement("span");
+  sep.className = "meta-sep";
+  sep.textContent = "•";
+
+  const uploadedEl = document.createElement("span");
+  uploadedEl.textContent = new Date(clip.createdAt).toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit"
+  });
+
+  submeta.append(badge, sizeEl, sep, uploadedEl);
+
+  const shareStack = document.createElement("div");
+  shareStack.className = "clip-share-stack";
 
   const urlInput = document.createElement("input");
   urlInput.type = "text";
@@ -849,8 +1077,6 @@ function createClipCard(clip) {
   urlInput.readOnly = true;
   urlInput.setAttribute("aria-label", `Shareable link for ${clip.name}`);
   urlInput.addEventListener("click", () => urlInput.select());
-
-  inputGroup.appendChild(urlInput);
 
   const actions = document.createElement("div");
   actions.className = "clip-actions";
@@ -868,11 +1094,6 @@ function createClipCard(clip) {
     }
   });
 
-  const openBtn = document.createElement("a");
-  openBtn.className = "btn btn-secondary";
-  openBtn.href = `#clip=${encodeURIComponent(clip.id)}`;
-  openBtn.textContent = "Open";
-
   const deleteBtn = document.createElement("button");
   deleteBtn.type = "button";
   deleteBtn.className = "btn btn-danger-ghost btn-icon";
@@ -881,10 +1102,11 @@ function createClipCard(clip) {
   deleteBtn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"></path></svg>`;
   deleteBtn.addEventListener("click", () => deleteClipById(clip.id, true));
 
-  actions.append(copyBtn, openBtn, deleteBtn);
-  bottom.append(inputGroup, actions);
+  actions.append(copyBtn, deleteBtn);
+  shareStack.append(urlInput, actions);
+  body.append(titleLink, submeta, shareStack);
 
-  card.append(top, bottom);
+  card.append(thumbLink, body);
   return card;
 }
 
@@ -956,11 +1178,21 @@ function renderActiveViewer(clip, mediaUrl) {
 
   const isAudio = clip.mediaKind === "audio";
   const remaining = clip.expiresAt - Date.now();
+  const durationLabel = formatDuration(clip.duration);
 
   dom.viewerTypeBadge.textContent = isAudio ? "Audio" : "Video";
-  dom.viewerTypeBadge.className = `media-badge ${isAudio ? "is-audio" : ""}`;
+  dom.viewerTypeBadge.className = `media-badge ${isAudio ? "is-audio" : ""}`.trim();
   dom.viewerFileName.textContent = clip.name;
-  dom.viewerMeta.textContent = `${formatBytes(clip.size)} • Uploaded ${new Date(clip.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+
+  const metaParts = [formatBytes(clip.size)];
+  if (durationLabel) metaParts.push(durationLabel);
+  metaParts.push(
+    `Uploaded ${new Date(clip.createdAt).toLocaleTimeString([], {
+      hour: "numeric",
+      minute: "2-digit"
+    })}`
+  );
+  dom.viewerMeta.textContent = metaParts.join(" • ");
 
   dom.viewerCountdown.textContent = formatCountdown(remaining);
   dom.viewerTimerBox.className = `viewer-timer-box ${getUrgencyClass(remaining)}`.trim();
@@ -991,6 +1223,7 @@ function renderActiveViewer(clip, mediaUrl) {
     video.controls = true;
     video.playsInline = true;
     video.preload = "metadata";
+    if (clip.thumbnail) video.poster = clip.thumbnail;
     video.src = mediaUrl;
     dom.viewerMediaStage.appendChild(video);
   }
@@ -1047,7 +1280,7 @@ function startCountdownTicker() {
   state.tickerId = setInterval(() => {
     const now = Date.now();
 
-    // 1. Update uploader dashboard cards
+    // 1. Update uploader dashboard YouTube card countdowns
     if (state.isUnlocked) {
       for (const clip of [...state.clips]) {
         const remaining = clip.expiresAt - now;
@@ -1057,11 +1290,11 @@ function startCountdownTicker() {
           continue;
         }
 
-        const chip = dom.clipList.querySelector(`[data-countdown-for="${CSS.escape(clip.id)}"]`);
-        if (chip) {
-          const textNode = chip.querySelector(".countdown-text");
+        const pill = dom.clipList.querySelector(`[data-countdown-for="${CSS.escape(clip.id)}"]`);
+        if (pill) {
+          const textNode = pill.querySelector(".countdown-text");
           if (textNode) textNode.textContent = formatCountdown(remaining);
-          chip.className = `countdown-chip ${getUrgencyClass(remaining)}`.trim();
+          pill.className = `thumb-countdown ${getUrgencyClass(remaining)}`.trim();
         }
       }
     }
@@ -1209,7 +1442,6 @@ function bindEvents() {
 }
 
 async function init() {
-  // Clean up legacy local clip cache from earlier version if present
   try {
     localStorage.removeItem(LEGACY_LOCAL_LIST_KEY);
   } catch {
